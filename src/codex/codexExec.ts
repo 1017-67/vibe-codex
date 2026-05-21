@@ -1,0 +1,330 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { Config, AutonomyLevel } from "../config/types.js";
+import { gitDiff, gitStatus } from "../workspace/git.js";
+import { RunStore } from "../runs/runStore.js";
+import { RunRecord } from "../runs/types.js";
+import { assertSafeWorkspacePath } from "../safety/paths.js";
+import { runProcessArgv } from "../util/spawn.js";
+import { compileCodexPrompt } from "./promptCompiler.js";
+import { logger } from "../util/logger.js";
+import { VibeError } from "../util/errors.js";
+
+export type ExecutionMode = "exec-hidden" | "terminal-visible" | "app-supervised";
+
+export interface CodexExecCapabilities {
+  supportsSandbox: boolean;
+  supportsExecAskForApproval: boolean;
+  supportsGlobalAskForApproval: boolean;
+}
+
+const SANDBOX_VALUES = ["read-only", "workspace-write", "danger-full-access"] as const;
+const APPROVAL_VALUES = ["untrusted", "on-failure", "on-request", "never"] as const;
+
+function normalizeSandbox(value: string | undefined): string {
+  if (value && (SANDBOX_VALUES as readonly string[]).includes(value)) return value;
+  if (value) logger.warn("unsupported_codex_sandbox_fallback", { configured: value, fallback: "workspace-write" });
+  return "workspace-write";
+}
+
+function normalizeApproval(value: string | undefined): string {
+  if (value && (APPROVAL_VALUES as readonly string[]).includes(value)) return value;
+  if (value) logger.warn("unsupported_codex_approval_fallback", { configured: value, fallback: "untrusted" });
+  return "untrusted";
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export async function inspectCodexExecCapabilities(config: Config): Promise<CodexExecCapabilities> {
+  const [execHelp, globalHelp] = await Promise.all([
+    runProcessArgv({ file: config.codexBin, args: ["exec", "--help"], timeoutMs: 10_000, maxOutputBytes: 50_000 }),
+    runProcessArgv({ file: config.codexBin, args: ["--help"], timeoutMs: 10_000, maxOutputBytes: 50_000 }),
+  ]);
+  const execText = `${execHelp.stdout}\n${execHelp.stderr}`;
+  const globalText = `${globalHelp.stdout}\n${globalHelp.stderr}`;
+  return {
+    supportsSandbox: execText.includes("--sandbox") || globalText.includes("--sandbox"),
+    supportsExecAskForApproval: execText.includes("--ask-for-approval"),
+    supportsGlobalAskForApproval: globalText.includes("--ask-for-approval"),
+  };
+}
+
+export function buildCodexExecArgv(args: {
+  prompt: string;
+  sandbox?: string;
+  approval?: string;
+  capabilities: CodexExecCapabilities;
+}): string[] {
+  const sandbox = normalizeSandbox(args.sandbox);
+  const approval = normalizeApproval(args.approval);
+  const argv: string[] = [];
+  if (args.capabilities.supportsGlobalAskForApproval && !args.capabilities.supportsExecAskForApproval) {
+    argv.push("--ask-for-approval", approval);
+  }
+  argv.push("exec");
+  if (args.capabilities.supportsSandbox) argv.push("--sandbox", sandbox);
+  if (args.capabilities.supportsExecAskForApproval) argv.push("--ask-for-approval", approval);
+  if (!args.capabilities.supportsGlobalAskForApproval && !args.capabilities.supportsExecAskForApproval) {
+    logger.warn("codex_approval_flag_unsupported", { fallback: "omitting ask-for-approval flag" });
+  }
+  argv.push(args.prompt);
+  return argv;
+}
+
+function codexArgs(prompt: string, config: Config, capabilities: CodexExecCapabilities): string[] {
+  const args = buildCodexExecArgv({
+    prompt,
+    sandbox: config.defaultCodexSandbox,
+    approval: config.defaultCodexApproval,
+    capabilities,
+  });
+  if (args.includes("--approval")) {
+    throw new VibeError("CODEX_EXEC_FAILED", "Internal error: deprecated --approval flag must not be used.");
+  }
+  return args;
+}
+
+function codexScriptCommand(config: Config, capabilities: CodexExecCapabilities, promptPath: string): string {
+  const sandbox = normalizeSandbox(config.defaultCodexSandbox);
+  const approval = normalizeApproval(config.defaultCodexApproval);
+  const parts: string[] = [shellQuote(config.codexBin)];
+  if (capabilities.supportsGlobalAskForApproval && !capabilities.supportsExecAskForApproval) {
+    parts.push("--ask-for-approval", shellQuote(approval));
+  }
+  parts.push("exec");
+  if (capabilities.supportsSandbox) parts.push("--sandbox", shellQuote(sandbox));
+  if (capabilities.supportsExecAskForApproval) parts.push("--ask-for-approval", shellQuote(approval));
+  parts.push(`"$(cat ${shellQuote(promptPath)})"`);
+  return parts.join(" ");
+}
+
+async function ensureRunDir(workspacePath: string, runId: string) {
+  const runDir = path.join(workspacePath, ".vibe-codex", "runs", runId);
+  await fs.mkdir(runDir, { recursive: true });
+  return runDir;
+}
+
+async function writePrompt(runDir: string, prompt: string) {
+  const promptPath = path.join(runDir, "prompt.md");
+  await fs.writeFile(promptPath, prompt, "utf8");
+  return promptPath;
+}
+
+export async function createTerminalVisibleRunArtifacts(args: {
+  workspacePath: string;
+  runId: string;
+  prompt: string;
+  config: Config;
+  capabilities: CodexExecCapabilities;
+}) {
+  const runDir = await ensureRunDir(args.workspacePath, args.runId);
+  const promptPath = await writePrompt(runDir, args.prompt);
+  const logPath = path.join(runDir, "codex.log");
+  const scriptPath = path.join(runDir, "run-codex.sh");
+  const codexCommand = codexScriptCommand(args.config, args.capabilities, promptPath);
+  const script = `#!/usr/bin/env bash
+set -euo pipefail
+cd ${shellQuote(args.workspacePath)}
+echo "Vibe Codex visible run: ${args.runId}"
+echo "Prompt: ${path.relative(args.workspacePath, promptPath)}"
+echo "Starting Codex..."
+${codexCommand} 2>&1 | tee ${shellQuote(logPath)}
+echo "Codex finished."
+echo "Press Enter to close."
+read
+`;
+  await fs.writeFile(scriptPath, script, { encoding: "utf8", mode: 0o700 });
+  await fs.chmod(scriptPath, 0o700);
+  return { runDir, promptPath, logPath, scriptPath, script };
+}
+
+async function createPromptOnlyRunArtifacts(workspacePath: string, runId: string, prompt: string) {
+  const runDir = await ensureRunDir(workspacePath, runId);
+  const promptPath = await writePrompt(runDir, prompt);
+  return { runDir, promptPath };
+}
+
+export async function startTerminalVisibleCodexTask(args: {
+  workspacePath: string;
+  prompt: string;
+  autonomy: AutonomyLevel;
+  config: Config;
+  runStore: RunStore;
+  launch?: boolean;
+}): Promise<RunRecord> {
+  const cwd = await assertSafeWorkspacePath(args.workspacePath, args.config);
+  const capabilities = await inspectCodexExecCapabilities(args.config);
+  const placeholder = args.runStore.createRun({
+    workspacePath: cwd,
+    status: "running_visible",
+    autonomy: args.autonomy,
+    prompt: args.prompt,
+    command: "pending visible terminal launch",
+    metadata: { executionMode: "terminal-visible" },
+  });
+  const artifacts = await createTerminalVisibleRunArtifacts({ workspacePath: cwd, runId: placeholder.id, prompt: args.prompt, config: args.config, capabilities });
+  const openResult = args.launch === false
+    ? undefined
+    : await runProcessArgv({ file: "open", args: ["-a", "Terminal", artifacts.scriptPath], cwd, timeoutMs: 30_000, maxOutputBytes: args.config.maxCommandOutputBytes });
+  return args.runStore.updateRun(placeholder.id, {
+    codexCommand: openResult?.command ?? artifacts.scriptPath,
+    stdout: openResult?.stdout ?? "",
+    stderr: openResult?.stderr ?? "",
+    exitCode: openResult?.exitCode ?? null,
+    metadata: {
+      executionMode: "terminal-visible",
+      runDir: artifacts.runDir,
+      promptPath: artifacts.promptPath,
+      logPath: artifacts.logPath,
+      scriptPath: artifacts.scriptPath,
+      launchExitCode: openResult?.exitCode,
+    },
+  });
+}
+
+export async function startAppSupervisedCodexTask(args: {
+  workspacePath: string;
+  prompt: string;
+  autonomy: AutonomyLevel;
+  config: Config;
+  runStore: RunStore;
+  openApp?: boolean;
+  copyClipboard?: boolean;
+}): Promise<RunRecord> {
+  const cwd = await assertSafeWorkspacePath(args.workspacePath, args.config);
+  const placeholder = args.runStore.createRun({
+    workspacePath: cwd,
+    status: "running_visible",
+    autonomy: args.autonomy,
+    prompt: args.prompt,
+    command: "app-supervised prompt handoff",
+    metadata: { executionMode: "app-supervised" },
+  });
+  const artifacts = await createPromptOnlyRunArtifacts(cwd, placeholder.id, args.prompt);
+  const appResult = args.openApp === false
+    ? undefined
+    : await runProcessArgv({ file: args.config.codexBin, args: ["app", cwd], cwd, timeoutMs: 30_000, maxOutputBytes: args.config.maxCommandOutputBytes });
+  const copyResult = args.copyClipboard === false
+    ? undefined
+    : await runProcessArgv({ file: "/bin/sh", args: ["-c", `command -v pbcopy >/dev/null 2>&1 && cat ${shellQuote(artifacts.promptPath)} | pbcopy`], cwd, timeoutMs: 10_000, maxOutputBytes: args.config.maxCommandOutputBytes }).catch(() => undefined);
+  return args.runStore.updateRun(placeholder.id, {
+    stdout: [appResult?.stdout, copyResult?.stdout].filter(Boolean).join("\n"),
+    stderr: [appResult?.stderr, copyResult?.stderr].filter(Boolean).join("\n"),
+    exitCode: appResult?.exitCode ?? null,
+    metadata: {
+      executionMode: "app-supervised",
+      runDir: artifacts.runDir,
+      promptPath: artifacts.promptPath,
+      appOpened: appResult ? appResult.exitCode === 0 : false,
+      clipboardCopied: copyResult ? copyResult.exitCode === 0 : false,
+    },
+  });
+}
+
+export async function collectVisibleRunResult(args: {
+  runId: string;
+  config: Config;
+  runStore: RunStore;
+  maxBytes?: number;
+}) {
+  const run = args.runStore.getRun(args.runId);
+  if (!run) throw new VibeError("CONFIG_ERROR", "Run not found.", { runId: args.runId });
+  const logPath = typeof run.metadata?.logPath === "string" ? run.metadata.logPath : undefined;
+  let log = "";
+  let truncated = false;
+  if (logPath) {
+    try {
+      const stat = await fs.stat(logPath);
+      const maxBytes = args.maxBytes ?? args.config.maxCommandOutputBytes;
+      const handle = await fs.open(logPath, "r");
+      try {
+        const length = Math.min(stat.size, maxBytes);
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, Math.max(0, stat.size - length));
+        log = buffer.toString("utf8");
+        truncated = stat.size > maxBytes;
+      } finally {
+        await handle.close();
+      }
+    } catch {
+      log = "";
+    }
+  }
+  const status = await gitStatus(run.workspacePath, args.config).catch(() => undefined);
+  const diff = await gitDiff(run.workspacePath, args.config, args.maxBytes ?? 80_000).catch(() => undefined);
+  const changedFiles = (status?.stdout ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.slice(3).trim());
+  return {
+    runId: run.id,
+    status: run.status,
+    log,
+    truncated,
+    logPath,
+    promptPath: run.metadata?.promptPath,
+    gitStatus: status?.stdout ?? "",
+    gitDiffSummary: diff?.stdout ?? "",
+    changedFiles,
+  };
+}
+
+export async function startCodexExecTask(args: {
+  workspacePath: string;
+  prompt: string;
+  autonomy: AutonomyLevel;
+  config: Config;
+  runStore: RunStore;
+}): Promise<RunRecord> {
+  const cwd = await assertSafeWorkspacePath(args.workspacePath, args.config);
+  const capabilities = await inspectCodexExecCapabilities(args.config);
+  const argv = codexArgs(args.prompt, args.config, capabilities);
+  const placeholder = args.runStore.createRun({
+    workspacePath: cwd,
+    status: "running",
+    autonomy: args.autonomy,
+    prompt: args.prompt,
+    command: [args.config.codexBin, ...argv].join(" "),
+  });
+  const result = await runProcessArgv({
+    file: args.config.codexBin,
+    args: argv,
+    cwd,
+    timeoutMs: args.config.codexTimeoutMs,
+    maxOutputBytes: args.config.maxCommandOutputBytes,
+  });
+  return args.runStore.updateRun(placeholder.id, {
+    status: result.exitCode === 0 ? "completed" : "failed",
+    stdout: result.stdout,
+    stderr: result.stderr,
+    exitCode: result.exitCode,
+    metadata: { timedOut: result.timedOut, signal: result.signal, durationMs: result.durationMs },
+  });
+}
+
+function tail(text: string, bytes = 20_000): string {
+  return text.length <= bytes ? text : text.slice(text.length - bytes);
+}
+
+export async function continueCodexTask(args: {
+  runId: string;
+  instruction: string;
+  autonomy: AutonomyLevel;
+  config: Config;
+  runStore: RunStore;
+}): Promise<RunRecord> {
+  const prior = args.runStore.getRun(args.runId);
+  if (!prior) throw new Error(`Run not found: ${args.runId}`);
+  const status = await gitStatus(prior.workspacePath, args.config).catch((error) => ({ stdout: "", stderr: String(error) }));
+  const diff = await gitDiff(prior.workspacePath, args.config, 40_000).catch((error) => ({ stdout: "", stderr: String(error) }));
+  const prompt = compileCodexPrompt({
+    workspacePath: prior.workspacePath,
+    userGoal: `Continue prior Vibe Codex run ${prior.id}.\n\nOriginal prompt:\n${prior.prompt}\n\nPrevious stdout tail:\n${tail(prior.stdout)}\n\nPrevious stderr tail:\n${tail(prior.stderr)}\n\nCurrent git status:\n${"stdout" in status ? status.stdout : ""}\n\nCurrent git diff:\n${"stdout" in diff ? tail(diff.stdout, 40_000) : ""}\n\nNew instruction:\n${args.instruction}`,
+    autonomy: args.autonomy,
+  });
+  const run = await startCodexExecTask({ workspacePath: prior.workspacePath, prompt, autonomy: args.autonomy, config: args.config, runStore: args.runStore });
+  return args.runStore.updateRun(run.id, { metadata: { ...(run.metadata ?? {}), previousRunId: prior.id } });
+}
