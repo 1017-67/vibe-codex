@@ -2,7 +2,7 @@
 
 Tell ChatGPT what to build. Watch Codex do it.
 
-Vibe Codex is a local MCP server that lets ChatGPT orchestrate Codex CLI inside approved folders on your Mac. The Codex desktop app can be opened for supervision, but v0.2 automation goes through `codex exec` and visible Terminal handoff, not GUI typing.
+Vibe Codex is a local MCP server that lets ChatGPT orchestrate Codex CLI inside approved folders on your Mac. The preferred v0.2 supervised path opens normal interactive Codex in Ghostty with the task prompt submitted as the initial prompt argument. Legacy hidden execution is still available through approval-gated `codex exec`, and the Codex desktop app can be opened for visual supervision.
 
 ## Architecture
 
@@ -209,15 +209,15 @@ Dynamic client registration remains unauthenticated when experimental OAuth is e
 
 `start_codex_task` accepts `executionMode`:
 
-- `ghostty-visible` is the preferred default when `PREFER_GHOSTTY=true`. It writes `.vibe-codex/runs/<runId>/prompt.md` and metadata, copies the full prompt to the clipboard with `pbcopy` when available, then opens normal interactive `codex` in Ghostty. Paste the prompt into Codex manually so the chat stays visible and under your control. No `run-codex.sh`, `codex.log`, hidden exec, or `codex exec` is used in this mode.
+- `ghostty-visible` is the preferred default when `PREFER_GHOSTTY=true`. It writes `.vibe-codex/runs/<runId>/prompt.md` and metadata, then opens normal interactive `codex` in Ghostty with the full prompt passed as the initial prompt argument. No `run-codex.sh`, `codex.log`, hidden exec, shell pipe, GUI typing, or `codex exec` is used in this mode.
 - `terminal-visible` is the legacy supervised script mode. It writes `run-codex.sh` and `codex.log`, then opens macOS Terminal directly.
 - `app-supervised` opens `codex app <workspace>`, writes the prompt file, and copies the prompt to the clipboard with `pbcopy` when available. Paste it into the Codex app manually.
 - `codex-app-thread` is experimental. It uses configured Codex app-server HTTP APIs when `CODEX_APP_SERVER_URL` is set and reachable. If unavailable, tools return a clear error recommending `ghostty-visible`.
 - `exec-hidden` runs `codex exec` synchronously and returns captured stdout/stderr. It is not the default and requires `allowHiddenCodex: true` or a one-time approval.
 
-In `ghostty-visible`, Vibe Codex launches normal interactive Codex rather than sending the prompt automatically. The terminal remains yours: paste the copied prompt, chat normally, approve or reject Codex prompts, and press Ctrl+C whenever you want to interrupt.
+In `ghostty-visible`, Vibe Codex launches normal interactive Codex and submits the prompt as Codex's initial prompt argument. The terminal remains yours: watch Codex messages, continue chatting normally, approve or reject Codex prompts, and press Ctrl+C whenever you want to interrupt.
 
-When Ghostty supports direct command launch, Vibe Codex opens Ghostty with normal `codex` already running in the workspace. If that launch style is unavailable, it opens Ghostty in the workspace and returns a message telling you to type `codex` before pasting the copied prompt. If Ghostty itself is unavailable, Vibe Codex falls back to macOS Terminal.
+When Ghostty supports direct command launch, Vibe Codex runs `codex "<prompt>"` in the workspace through argv passed to Ghostty. If that launch style is unavailable, it opens Ghostty in the workspace and returns a clear message rather than trying shell interpolation. If Ghostty itself is unavailable, Vibe Codex falls back to macOS Terminal only for a safe workspace-open fallback.
 
 In legacy `terminal-visible`, the generated script prints the exact prompt, run ID, workspace, prompt path, log path, execution mode, terminal app, and redacted Codex command before Codex starts. The script waits at `Press Enter to start Codex, or Ctrl+C to cancel.` Ctrl+C cancels before start or interrupts Codex after start; output is written live to `codex.log`.
 
@@ -295,7 +295,7 @@ Blocked commands never run. Dangerous commands are not executed. Normal commands
 ## Known Limitations
 
 - Experimental OAuth tokens/codes are in-memory and reset when the relay restarts.
-- `ghostty-visible` launches normal interactive Codex in Ghostty and relies on manual paste/control; completion is inferred from workspace changes.
+- `ghostty-visible` launches normal interactive Codex in Ghostty with the initial prompt already submitted; completion is inferred from workspace changes.
 - `terminal-visible` uses `codex exec` through the legacy visible script.
 - `codex-app-thread` is experimental and requires an external Codex app-server URL; when unavailable, use `ghostty-visible`.
 - Continuation is approximated through saved run context.

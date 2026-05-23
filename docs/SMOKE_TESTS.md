@@ -61,9 +61,9 @@ Call `relay_health`, then `connector_setup_status`.
 
 1. Call `create_workspace` with `initGit: true`.
 2. Call `start_codex_task` with default `executionMode` (`ghostty-visible` when `PREFER_GHOSTTY=true`) and a task that creates one file.
-3. Confirm the tool returns `status: "interactive_ready"`, `promptPath`, and `copiedToClipboard`.
-4. Watch Ghostty open normal interactive `codex`. If Ghostty is unavailable, Vibe Codex falls back to macOS Terminal.
-5. Paste the copied prompt into Codex manually. No generated `run-codex.sh`, `codex.log`, hidden exec, or `codex exec` should be used for `ghostty-visible`.
+3. Confirm the tool returns `status: "interactive_started"`, `promptPath`, and `promptSubmittedAutomatically: true`.
+4. Watch Ghostty open normal interactive `codex` with the prompt already submitted. If Ghostty is unavailable, Vibe Codex falls back only to a safe workspace-open behavior.
+5. Confirm no generated `run-codex.sh`, `codex.log`, hidden exec, shell pipe, GUI typing, or `codex exec` is used for `ghostty-visible`.
 6. Chat normally, approve or reject Codex prompts, and use Ctrl+C if you want to interrupt.
 7. Let Codex create the requested file.
 8. Call `collect_visible_run_result`.

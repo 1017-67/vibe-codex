@@ -129,10 +129,13 @@ describe("experimental OAuth", () => {
     const page = await fetch(`${baseUrl}/authorize?${params}`);
     const html = await page.text();
     expect(page.status).toBe(200);
+    expect(page.headers.get("content-security-policy")).toContain("default-src 'none'");
     expect(html).toContain("Vibe Codex");
     expect(html).toContain("Local ChatGPT ↔ Codex pairing");
     expect(html).toContain("ChatGPT wants to connect");
     expect(html).toContain("Approving allows ChatGPT to call Vibe Codex tools on this Mac.");
+    expect(html).toContain("File creation inside allowed workspaces");
+    expect(html).toContain("Hidden Codex execution is not the default");
     expect(html).toContain(clientId);
     expect(html).toContain("chatgpt.com");
     expect(html).toContain("<code>mcp</code>");
@@ -147,6 +150,8 @@ describe("experimental OAuth", () => {
     expect(html).not.toContain("test-token");
     expect(html).not.toContain("vibe_url_token_that_should_not_render");
     expect(html).not.toContain("vibe_oauth_");
+    expect(html).not.toContain("access_token");
+    expect(html).not.toContain("code=");
     expect(html).not.toContain("code_verifier");
     expect(html).not.toContain(verifier);
 
@@ -155,6 +160,14 @@ describe("experimental OAuth", () => {
 
     const approved = await fetch(`${baseUrl}/authorize`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ...Object.fromEntries(params), decision: "approve" }) });
     expect(approved.headers.get("location")).toContain("code=");
+
+    const tampered = await fetch(`${baseUrl}/authorize`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ ...Object.fromEntries(params), decision: "approve", code_challenge_method: "plain" }),
+    });
+    expect(tampered.headers.get("location")).toContain("error=invalid_request");
   });
 
   it("rejects invalid redirect_uri", async () => {

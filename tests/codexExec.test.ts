@@ -96,7 +96,7 @@ describe("Codex exec integration", () => {
     await expect(fs.readFile(run.metadata!.promptPath as string, "utf8")).resolves.toBe("Visible prompt");
   });
 
-  it("ghostty-visible creates an interactive prompt handoff without run-codex.sh or codex exec", async () => {
+  it("ghostty-visible starts interactive codex with initial prompt without run-codex.sh or codex exec", async () => {
     const run = await startGhosttyInteractiveCodexTask({
       workspacePath: workspace,
       prompt: "Ghostty visible prompt",
@@ -104,59 +104,19 @@ describe("Codex exec integration", () => {
       config: ctx.config,
       runStore: store,
       launch: false,
-      copyClipboard: false,
+      detectDirectCodexSupport: async () => true,
     });
-    expect(run.status).toBe("interactive_ready");
+    expect(run.status).toBe("interactive_started");
     expect(run.codexCommand).toBe("interactive codex handoff");
     expect(run.metadata?.executionMode).toBe("ghostty-visible");
     expect(run.metadata?.terminalApp).toBe("ghostty");
+    expect(run.metadata?.promptSubmittedAutomatically).toBe(true);
+    expect(run.metadata?.launchedCodexDirectly).toBe(true);
     expect(run.metadata?.copiedToClipboard).toBe(false);
     expect(run.metadata?.scriptPath).toBeUndefined();
     expect(run.metadata?.logPath).toBeUndefined();
     await expect(fs.access(path.join(run.metadata!.runDir as string, "run-codex.sh"))).rejects.toThrow();
     await expect(fs.readFile(run.metadata!.promptPath as string, "utf8")).resolves.toBe("Ghostty visible prompt");
-  });
-
-  it("ghostty-visible reports clipboard success when pbcopy succeeds", async () => {
-    const binDir = path.join(ctx.root, "bin");
-    await fs.mkdir(binDir);
-    await fs.writeFile(path.join(binDir, "pbcopy"), "#!/usr/bin/env bash\ncat >/dev/null\n", { mode: 0o700 });
-    const originalPath = process.env.PATH;
-    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
-    try {
-      const run = await startGhosttyInteractiveCodexTask({
-        workspacePath: workspace,
-        prompt: "Copy this prompt",
-        autonomy: "workspace",
-        config: ctx.config,
-        runStore: store,
-        launch: false,
-      });
-      expect(run.metadata?.copiedToClipboard).toBe(true);
-      expect(run.metadata?.clipboardExitCode).toBe(0);
-    } finally {
-      process.env.PATH = originalPath;
-    }
-  });
-
-  it("ghostty-visible reports clipboard failure when pbcopy is unavailable", async () => {
-    const originalPath = process.env.PATH;
-    process.env.PATH = "/nonexistent";
-    try {
-      const run = await startGhosttyInteractiveCodexTask({
-        workspacePath: workspace,
-        prompt: "Copy this prompt",
-        autonomy: "workspace",
-        config: ctx.config,
-        runStore: store,
-        launch: false,
-      });
-      expect(run.status).toBe("interactive_ready");
-      expect(run.metadata?.copiedToClipboard).toBe(false);
-      expect(run.metadata?.clipboardExitCode).not.toBe(0);
-    } finally {
-      process.env.PATH = originalPath;
-    }
   });
 
   it("falls back to Terminal when preferred Ghostty launch fails", async () => {
@@ -187,6 +147,7 @@ describe("Codex exec integration", () => {
     const attempts: Array<{ appName: string; directCodex: boolean }> = [];
     const launched = await launchInteractiveCodexTerminal({
       cwd: workspace,
+      prompt: "Initial prompt with spaces",
       config: ctx.config,
       preferredApp: "ghostty",
       fallbackApp: "Terminal",
@@ -197,7 +158,7 @@ describe("Codex exec integration", () => {
           exitCode: appName === "ghostty" ? 1 : 0,
           stdout: "",
           stderr: appName === "ghostty" ? "not found" : "",
-          command: directCodex ? `open -a ${appName} --args --working-directory ${workspace} -e codex` : `open -a ${appName} ${workspace}`,
+          command: directCodex ? `open -a ${appName} --args --working-directory ${workspace} -e codex Initial prompt with spaces` : `open -a ${appName} ${workspace}`,
         };
       },
     });
@@ -208,10 +169,36 @@ describe("Codex exec integration", () => {
     expect(launched.result?.command).not.toContain("exec");
   });
 
+  it("interactive Ghostty launcher passes prompt as argv to normal codex", async () => {
+    const attempts: Array<{ appName: string; directCodex: boolean; prompt: string }> = [];
+    const launched = await launchInteractiveCodexTerminal({
+      cwd: workspace,
+      prompt: "Initial prompt\nwith newline",
+      config: ctx.config,
+      preferredApp: "ghostty",
+      fallbackApp: "Terminal",
+      detectDirectCodexSupport: async () => true,
+      opener: async (appName, directCodex, prompt) => {
+        attempts.push({ appName, directCodex, prompt });
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          command: "open -n -a ghostty --args --working-directory=<workspace> -e codex <prompt-argv>",
+        };
+      },
+    });
+    expect(attempts).toEqual([{ appName: "ghostty", directCodex: true, prompt: "Initial prompt\nwith newline" }]);
+    expect(launched.terminalApp).toBe("ghostty");
+    expect(launched.launchedCodexDirectly).toBe(true);
+    expect(launched.result?.command).not.toContain("exec");
+  });
+
   it("interactive Ghostty launcher opens workspace without codex when direct command is unsupported", async () => {
     const attempts: Array<{ appName: string; directCodex: boolean }> = [];
     const launched = await launchInteractiveCodexTerminal({
       cwd: workspace,
+      prompt: "Initial prompt",
       config: ctx.config,
       preferredApp: "ghostty",
       fallbackApp: "Terminal",

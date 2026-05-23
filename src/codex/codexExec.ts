@@ -266,31 +266,32 @@ export async function launchVisibleTerminal(args: {
 
 export async function launchInteractiveCodexTerminal(args: {
   cwd: string;
+  prompt: string;
   config: Config;
   preferredApp: string;
   fallbackApp?: string;
   launch?: boolean;
   detectDirectCodexSupport?: () => Promise<boolean>;
-  opener?: (appName: string, directCodex: boolean) => Promise<{ exitCode: number | null; stdout: string; stderr: string; command: string }>;
+  opener?: (appName: string, directCodex: boolean, prompt: string) => Promise<{ exitCode: number | null; stdout: string; stderr: string; command: string }>;
 }) {
   const supportsDirectCodex = args.detectDirectCodexSupport ?? (() => detectGhosttyDirectCodexSupport(args.preferredApp));
   if (args.launch === false) {
     return { terminalApp: args.preferredApp, result: undefined, fallbackUsed: false, launchedCodexDirectly: await supportsDirectCodex() };
   }
   const directCodex = await supportsDirectCodex();
-  const opener = args.opener ?? ((appName: string, directCodex: boolean) => {
+  const opener = args.opener ?? ((appName: string, directCodex: boolean, prompt: string) => {
     const openArgs = directCodex
-      ? ["-n", "-a", appName, "--args", `--working-directory=${args.cwd}`, "-e", args.config.codexBin]
+      ? ["-n", "-a", appName, "--args", `--working-directory=${args.cwd}`, "-e", args.config.codexBin, prompt]
       : appName === args.preferredApp
         ? ["-n", "-a", appName, "--args", `--working-directory=${args.cwd}`]
         : ["-a", appName, args.cwd];
     return runProcessArgv({ file: "open", args: openArgs, cwd: args.cwd, timeoutMs: 30_000, maxOutputBytes: args.config.maxCommandOutputBytes });
   });
-  const first = await opener(args.preferredApp, directCodex);
+  const first = await opener(args.preferredApp, directCodex, args.prompt);
   if (first.exitCode === 0 || !args.fallbackApp || args.fallbackApp === args.preferredApp) {
     return { terminalApp: args.preferredApp, result: first, fallbackUsed: false, launchedCodexDirectly: first.exitCode === 0 && directCodex };
   }
-  const fallback = await opener(args.fallbackApp, false);
+  const fallback = await opener(args.fallbackApp, false, args.prompt);
   return { terminalApp: args.fallbackApp, result: fallback, fallbackUsed: true, launchedCodexDirectly: false };
 }
 
@@ -404,7 +405,7 @@ export async function startGhosttyInteractiveCodexTask(args: {
   runStore: RunStore;
   launch?: boolean;
   copyClipboard?: boolean;
-  opener?: (appName: string, directCodex: boolean) => Promise<{ exitCode: number | null; stdout: string; stderr: string; command: string }>;
+  opener?: (appName: string, directCodex: boolean, prompt: string) => Promise<{ exitCode: number | null; stdout: string; stderr: string; command: string }>;
   detectDirectCodexSupport?: () => Promise<boolean>;
 }): Promise<RunRecord> {
   const cwd = await assertSafeWorkspacePath(args.workspacePath, args.config);
@@ -429,9 +430,10 @@ export async function startGhosttyInteractiveCodexTask(args: {
     executionMode: "ghostty-visible",
     terminalApp: preferredApp,
   });
-  const copy = await copyPromptToClipboard({ promptPath, cwd, config: args.config, copy: args.copyClipboard });
+  const copy = await copyPromptToClipboard({ promptPath, cwd, config: args.config, copy: args.copyClipboard ?? false });
   const launch = await launchInteractiveCodexTerminal({
     cwd,
+    prompt: args.prompt,
     config: args.config,
     preferredApp,
     fallbackApp: args.config.terminalFallbackApp,
@@ -440,7 +442,7 @@ export async function startGhosttyInteractiveCodexTask(args: {
     detectDirectCodexSupport: args.detectDirectCodexSupport,
   });
   return args.runStore.updateRun(placeholder.id, {
-    status: "interactive_ready",
+    status: launch.launchedCodexDirectly ? "interactive_started" : "interactive_ready",
     codexCommand: launch.result?.command ?? "interactive codex handoff",
     stdout: [copy.stdout, launch.result?.stdout].filter(Boolean).join("\n"),
     stderr: [copy.stderr, launch.result?.stderr].filter(Boolean).join("\n"),
@@ -451,6 +453,7 @@ export async function startGhosttyInteractiveCodexTask(args: {
       terminalFallbackApp: args.config.terminalFallbackApp,
       terminalFallbackUsed: launch.fallbackUsed,
       launchedCodexDirectly: launch.launchedCodexDirectly,
+      promptSubmittedAutomatically: launch.launchedCodexDirectly,
       runDir,
       promptPath,
       baselineStatusPath,

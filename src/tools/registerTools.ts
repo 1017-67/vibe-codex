@@ -317,11 +317,12 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
         promptPath: run.metadata?.promptPath,
         copiedToClipboard: run.metadata?.copiedToClipboard === true,
         launchedCodexDirectly: run.metadata?.launchedCodexDirectly === true,
+        promptSubmittedAutomatically: run.metadata?.promptSubmittedAutomatically === true,
         requiresVisibleSupervision: true,
         doNotFallbackToDirectWrite: true,
         message: run.metadata?.launchedCodexDirectly === true
-          ? "Ghostty opened normal Codex. The prompt was copied to clipboard; paste it into Codex to start. No script or hidden exec was used."
-          : `${String(run.metadata?.terminalApp ?? "Terminal")} opened in the workspace and the prompt was copied to clipboard. Type \`codex\`, then paste the prompt into Codex to start. No script or hidden exec was used.`,
+          ? "Ghostty opened normal interactive Codex with the prompt submitted as the initial Codex prompt. No script, codex exec, shell pipe, or GUI typing was used."
+          : `${String(run.metadata?.terminalApp ?? "Terminal")} opened in the workspace. Type \`codex\` and use the prompt saved at ${String(run.metadata?.promptPath ?? "prompt.md")}. No script, codex exec, shell pipe, or GUI typing was used.`,
       };
     }
 

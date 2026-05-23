@@ -415,17 +415,20 @@ export function createHttpApp(config: Config, createServer: () => McpServer, aut
       if (state) url.searchParams.set("state", state);
       return res.redirect(url.toString());
     }
-    res.type("html").send(renderAuthorizePage({
-      config,
-      issuer: requestBaseUrl(req, config),
-      clientId,
-      redirectUri,
-      codeChallenge,
-      codeChallengeMethod,
-      state,
-      scope,
-      resource,
-    }));
+    res
+      .setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+      .type("html")
+      .send(renderAuthorizePage({
+        config,
+        issuer: requestBaseUrl(req, config),
+        clientId,
+        redirectUri,
+        codeChallenge,
+        codeChallengeMethod,
+        state,
+        scope,
+        resource,
+      }));
   });
 
   app.post("/authorize", (req, res) => {
@@ -434,12 +437,15 @@ export function createHttpApp(config: Config, createServer: () => McpServer, aut
     const clientId = String(req.body.client_id ?? "");
     const redirectUri = String(req.body.redirect_uri ?? "");
     const codeChallenge = String(req.body.code_challenge ?? "");
+    const codeChallengeMethod = String(req.body.code_challenge_method ?? "");
+    const responseType = String(req.body.response_type ?? "");
     const state = typeof req.body.state === "string" ? req.body.state : undefined;
     const scope = typeof req.body.scope === "string" ? req.body.scope : "mcp";
     const resource = typeof req.body.resource === "string" ? req.body.resource : undefined;
     if (!oauthStore.validateClient(clientId) || !validateRedirectUri(config, redirectUri) || !isClientRedirectAllowed(oauthStore, clientId, redirectUri)) return res.status(400).send("invalid_request");
     if (hasInvalidProvidedState(req.body.state) || !validateOAuthScope(scope)) return res.redirect(redirectWithError(redirectUri, "invalid_request", state));
     if (req.body.decision !== "approve") return res.redirect(redirectWithError(redirectUri, "access_denied", state));
+    if (responseType !== "code" || !codeChallenge || codeChallengeMethod !== "S256") return res.redirect(redirectWithError(redirectUri, "invalid_request", state));
     const code = oauthStore.createCode({ clientId, redirectUri, codeChallenge, scope, resource, config });
     const url = new URL(redirectUri);
     url.searchParams.set("code", code.code);
