@@ -14,6 +14,10 @@ export interface Config {
   defaultParentDir: string;
   publicBaseUrl?: string;
   codexBin: string;
+  terminalApp: string;
+  terminalFallbackApp: string;
+  preferGhostty: boolean;
+  codexAppServerUrl?: string;
   databasePath: string;
   defaultCodexApproval: string;
   defaultCodexSandbox: string;

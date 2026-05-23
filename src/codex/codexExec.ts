@@ -10,7 +10,7 @@ import { compileCodexPrompt } from "./promptCompiler.js";
 import { logger } from "../util/logger.js";
 import { VibeError } from "../util/errors.js";
 
-export type ExecutionMode = "exec-hidden" | "terminal-visible" | "app-supervised";
+export type ExecutionMode = "exec-hidden" | "terminal-visible" | "ghostty-visible" | "app-supervised" | "codex-app-thread";
 
 export interface CodexExecCapabilities {
   supportsSandbox: boolean;
@@ -100,6 +100,20 @@ function codexScriptCommand(config: Config, capabilities: CodexExecCapabilities,
   return parts.join(" ");
 }
 
+function redactedCodexScriptCommand(config: Config, capabilities: CodexExecCapabilities): string {
+  const sandbox = normalizeSandbox(config.defaultCodexSandbox);
+  const approval = normalizeApproval(config.defaultCodexApproval);
+  const parts: string[] = [config.codexBin];
+  if (capabilities.supportsGlobalAskForApproval && !capabilities.supportsExecAskForApproval) {
+    parts.push("--ask-for-approval", approval);
+  }
+  parts.push("exec");
+  if (capabilities.supportsSandbox) parts.push("--sandbox", sandbox);
+  if (capabilities.supportsExecAskForApproval) parts.push("--ask-for-approval", approval);
+  parts.push("<prompt from prompt.md>");
+  return parts.join(" ");
+}
+
 async function ensureRunDir(workspacePath: string, runId: string) {
   const runDir = path.join(workspacePath, ".vibe-codex", "runs", runId);
   await fs.mkdir(runDir, { recursive: true });
@@ -118,6 +132,8 @@ export async function createTerminalVisibleRunArtifacts(args: {
   prompt: string;
   config: Config;
   capabilities: CodexExecCapabilities;
+  executionMode?: "terminal-visible" | "ghostty-visible";
+  terminalApp?: string;
   baselineStatus?: string;
 }) {
   const runDir = await ensureRunDir(args.workspacePath, args.runId);
@@ -136,29 +152,69 @@ export async function createTerminalVisibleRunArtifacts(args: {
     scriptPath,
     baselineStatusPath,
     finalStatusPath,
+    executionMode: args.executionMode ?? "terminal-visible",
+    terminalApp: args.terminalApp ?? "Terminal",
     createdAt: new Date().toISOString(),
   }, null, 2), "utf8");
   const codexCommand = codexScriptCommand(args.config, args.capabilities, promptPath);
+  const redactedCodexCommand = redactedCodexScriptCommand(args.config, args.capabilities);
   const promptRelativePath = path.relative(args.workspacePath, promptPath);
   const script = `#!/usr/bin/env bash
 set -euo pipefail
 cd ${shellQuote(args.workspacePath)}
 printf '%s\\n' ${shellQuote(`Vibe Codex visible run: ${args.runId}`)}
+printf '%s\\n' ${shellQuote(`Workspace: ${args.workspacePath}`)}
 printf '%s\\n' ${shellQuote(`Prompt: ${promptRelativePath}`)}
-printf '%s\\n' 'Starting Codex...'
+printf '%s\\n' ${shellQuote(`Prompt path: ${promptPath}`)}
+printf '%s\\n' ${shellQuote(`Log path: ${logPath}`)}
+printf '%s\\n' ${shellQuote(`Execution mode: ${args.executionMode ?? "terminal-visible"}`)}
+printf '%s\\n' ${shellQuote(`Terminal app: ${args.terminalApp ?? "Terminal"}`)}
+printf '%s\\n' ${shellQuote(`Codex command: ${redactedCodexCommand}`)}
+printf '%s\\n' ''
+printf '%s\\n' 'Prompt follows:'
+printf '%s\\n' '----------------------------------------'
+cat ${shellQuote(promptPath)}
+printf '%s\\n' ''
+printf '%s\\n' '----------------------------------------'
+printf '%s\\n' 'Press Enter to start Codex, or Ctrl+C to cancel.'
+printf '%s\\n' 'Ctrl+C stops the run. Codex output is written live to the log path above.'
+read
 set +e
-${codexCommand} 2>&1 | tee ${shellQuote(logPath)}
+printf '%s\\n' '**VIBE_CODEX_RUN_STARTED**' | tee ${shellQuote(logPath)}
+${codexCommand} 2>&1 | tee -a ${shellQuote(logPath)}
 VIBE_CODEX_EXIT_CODE=\${PIPESTATUS[0]}
 set -e
 printf '%s\\n' "__VIBE_CODEX_RUN_EXIT_CODE=\${VIBE_CODEX_EXIT_CODE}" | tee -a ${shellQuote(logPath)}
+printf '%s\\n' '**VIBE_CODEX_RUN_FINISHED**' | tee -a ${shellQuote(logPath)}
 printf '%s\\n' '__VIBE_CODEX_RUN_FINISHED__' | tee -a ${shellQuote(logPath)}
 printf '%s\\n' 'Codex finished.'
 printf '%s\\n' 'Press Enter to close.'
-read
+read || true
 `;
   await fs.writeFile(scriptPath, script, { encoding: "utf8", mode: 0o700 });
   await fs.chmod(scriptPath, 0o700);
   return { runDir, promptPath, logPath, scriptPath, baselineStatusPath, finalStatusPath, metadataPath, script };
+}
+
+export async function launchVisibleTerminal(args: {
+  scriptPath: string;
+  cwd: string;
+  config: Config;
+  preferredApp: string;
+  fallbackApp?: string;
+  launch?: boolean;
+  opener?: (appName: string) => Promise<{ exitCode: number | null; stdout: string; stderr: string; command: string }>;
+}) {
+  if (args.launch === false) {
+    return { terminalApp: args.preferredApp, result: undefined, fallbackUsed: false };
+  }
+  const opener = args.opener ?? ((appName: string) => runProcessArgv({ file: "open", args: ["-a", appName, args.scriptPath], cwd: args.cwd, timeoutMs: 30_000, maxOutputBytes: args.config.maxCommandOutputBytes }));
+  const first = await opener(args.preferredApp);
+  if (first.exitCode === 0 || !args.fallbackApp || args.fallbackApp === args.preferredApp) {
+    return { terminalApp: args.preferredApp, result: first, fallbackUsed: false };
+  }
+  const fallback = await opener(args.fallbackApp);
+  return { terminalApp: args.fallbackApp, result: fallback, fallbackUsed: true };
 }
 
 async function createPromptOnlyRunArtifacts(workspacePath: string, runId: string, prompt: string) {
@@ -198,29 +254,40 @@ export async function startTerminalVisibleCodexTask(args: {
   config: Config;
   runStore: RunStore;
   launch?: boolean;
+  executionMode?: "terminal-visible" | "ghostty-visible";
 }): Promise<RunRecord> {
   const cwd = await assertSafeWorkspacePath(args.workspacePath, args.config);
   const capabilities = await inspectCodexExecCapabilities(args.config);
   const baselineStatus = (await gitStatus(cwd, args.config).catch(() => undefined))?.stdout ?? "";
+  const executionMode = args.executionMode ?? "terminal-visible";
+  const preferredApp = executionMode === "ghostty-visible" ? args.config.terminalApp : args.config.terminalFallbackApp;
   const placeholder = args.runStore.createRun({
     workspacePath: cwd,
     status: "running_visible",
     autonomy: args.autonomy,
     prompt: args.prompt,
     command: "pending visible terminal launch",
-    metadata: { executionMode: "terminal-visible" },
+    metadata: { executionMode, terminalApp: preferredApp },
   });
-  const artifacts = await createTerminalVisibleRunArtifacts({ workspacePath: cwd, runId: placeholder.id, prompt: args.prompt, config: args.config, capabilities, baselineStatus });
-  const openResult = args.launch === false
-    ? undefined
-    : await runProcessArgv({ file: "open", args: ["-a", "Terminal", artifacts.scriptPath], cwd, timeoutMs: 30_000, maxOutputBytes: args.config.maxCommandOutputBytes });
+  const artifacts = await createTerminalVisibleRunArtifacts({ workspacePath: cwd, runId: placeholder.id, prompt: args.prompt, config: args.config, capabilities, baselineStatus, executionMode, terminalApp: preferredApp });
+  const launch = await launchVisibleTerminal({
+    scriptPath: artifacts.scriptPath,
+    cwd,
+    config: args.config,
+    preferredApp,
+    fallbackApp: executionMode === "ghostty-visible" ? args.config.terminalFallbackApp : undefined,
+    launch: args.launch,
+  });
   return args.runStore.updateRun(placeholder.id, {
-    codexCommand: openResult?.command ?? artifacts.scriptPath,
-    stdout: openResult?.stdout ?? "",
-    stderr: openResult?.stderr ?? "",
-    exitCode: openResult?.exitCode ?? null,
+    codexCommand: launch.result?.command ?? artifacts.scriptPath,
+    stdout: launch.result?.stdout ?? "",
+    stderr: launch.result?.stderr ?? "",
+    exitCode: launch.result?.exitCode ?? null,
     metadata: {
-      executionMode: "terminal-visible",
+      executionMode,
+      terminalApp: launch.terminalApp,
+      terminalFallbackApp: args.config.terminalFallbackApp,
+      terminalFallbackUsed: launch.fallbackUsed,
       runDir: artifacts.runDir,
       promptPath: artifacts.promptPath,
       logPath: artifacts.logPath,
@@ -228,7 +295,7 @@ export async function startTerminalVisibleCodexTask(args: {
       baselineStatusPath: artifacts.baselineStatusPath,
       finalStatusPath: artifacts.finalStatusPath,
       metadataPath: artifacts.metadataPath,
-      launchExitCode: openResult?.exitCode,
+      launchExitCode: launch.result?.exitCode,
     },
   });
 }
@@ -331,16 +398,22 @@ export async function collectVisibleRunResult(args: {
     .filter((file) => newChangedFilesSinceRun.includes(file));
   const untrackedDiff = await buildUntrackedDiff(run.workspacePath, untrackedNewFiles, maxDiffBytes);
   const gitDiffSummary = [diff?.stdout ?? "", untrackedDiff].filter(Boolean).join("\n");
-  const completedMarkers = ["__VIBE_CODEX_RUN_FINISHED__", "Summary of changes:", "tokens used", "Codex finished."];
+  const completedMarkers = ["**VIBE_CODEX_RUN_FINISHED**", "__VIBE_CODEX_RUN_FINISHED__", "Summary of changes:", "tokens used", "Codex finished."];
   const failureMarkers = ["Not inside a trusted directory", "error:", "fatal:"];
-  const completedVisible = completedMarkers.some((marker) => log.includes(marker));
-  const failedVisible = !completedVisible && failureMarkers.some((marker) => log.toLowerCase().includes(marker.toLowerCase()));
+  const exitCodeMatch = log.match(/__VIBE_CODEX_RUN_EXIT_CODE=(-?\d+)/);
+  const visibleExitCode = exitCodeMatch ? Number.parseInt(exitCodeMatch[1], 10) : undefined;
+  const finishedMarker = log.includes("**VIBE_CODEX_RUN_FINISHED**") || log.includes("__VIBE_CODEX_RUN_FINISHED__");
+  const completedVisible = visibleExitCode === undefined
+    ? completedMarkers.some((marker) => log.includes(marker))
+    : finishedMarker && visibleExitCode === 0;
+  const failedVisible = !completedVisible && (
+    (finishedMarker && typeof visibleExitCode === "number" && visibleExitCode !== 0)
+    || failureMarkers.some((marker) => log.toLowerCase().includes(marker.toLowerCase()))
+  );
   const collectedStatus = completedVisible ? "completed_visible" : failedVisible ? "failed_visible" : run.status;
   if (collectedStatus !== run.status && (collectedStatus === "completed_visible" || collectedStatus === "failed_visible")) {
     args.runStore.updateRun(run.id, { status: collectedStatus });
   }
-  const exitCodeMatch = log.match(/__VIBE_CODEX_RUN_EXIT_CODE=(\d+)/);
-  const visibleExitCode = exitCodeMatch ? Number.parseInt(exitCodeMatch[1], 10) : undefined;
   if (metadataPath) {
     await fs.writeFile(metadataPath, JSON.stringify({
       runId: run.id,
@@ -360,18 +433,25 @@ export async function collectVisibleRunResult(args: {
   return {
     runId: run.id,
     status: collectedStatus,
+    executionMode: run.metadata?.executionMode,
+    terminalApp: run.metadata?.terminalApp,
     exitCode: visibleExitCode,
     log,
     truncated,
     logPath,
     promptPath: run.metadata?.promptPath,
+    scriptPath: run.metadata?.scriptPath,
     finalStatusPath,
     metadataPath,
     baselineStatus,
     gitStatus: statusText,
+    gitDiff: gitDiffSummary,
     gitDiffSummary,
     changedFiles,
     newChangedFilesSinceRun,
+    changedFilesSinceRun: newChangedFilesSinceRun,
+    summary: collectedStatus === "completed_visible" ? "Visible Codex run completed." : collectedStatus === "failed_visible" ? "Visible Codex run appears to have failed." : "Visible Codex run is still pending or running.",
+    doNotFallbackToDirectWrite: true,
   };
 }
 

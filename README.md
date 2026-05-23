@@ -46,12 +46,13 @@ URL_TOKEN=
 URL_TOKEN_REQUIRED_PREFIX=vibe_
 URL_TOKEN_MIN_LENGTH=32
 URL_TOKEN_EXPIRES_AT=
-ALLOWED_ROOTS=~/projects,~/67
-DEFAULT_PARENT_DIR=/Users/root/
 ALLOWED_ROOTS=~/Projects,~/codex-work
 DEFAULT_PARENT_DIR=~/codex-work
->>>>>>> be65c86 (Harden OAuth and command safety for Vibe Codex)
 CODEX_BIN=codex
+TERMINAL_APP=ghostty
+TERMINAL_FALLBACK_APP=Terminal
+PREFER_GHOSTTY=true
+CODEX_APP_SERVER_URL=
 DATABASE_PATH=./vibe-codex.sqlite
 DEFAULT_CODEX_APPROVAL=untrusted
 DEFAULT_CODEX_SANDBOX=workspace-write
@@ -188,6 +189,13 @@ Dynamic client registration remains unauthenticated when experimental OAuth is e
 - `open_in_codex_app`
 - `start_codex_task`
 - `continue_codex_task`
+- `detect_codex_app_server`
+- `list_codex_threads`
+- `start_codex_app_thread`
+- `resume_codex_app_thread`
+- `continue_codex_app_thread`
+- `fork_codex_app_thread`
+- `get_codex_app_thread_status`
 - `get_run`
 - `git_status`
 - `git_diff`
@@ -201,11 +209,31 @@ Dynamic client registration remains unauthenticated when experimental OAuth is e
 
 `start_codex_task` accepts `executionMode`:
 
-- `terminal-visible` is the default. It writes `.vibe-codex/runs/<runId>/prompt.md` and `run-codex.sh`, then opens the script in macOS Terminal so you can watch Codex run. Poll with `collect_visible_run_result`.
-- `exec-hidden` runs `codex exec` synchronously and returns captured stdout/stderr. It requires `allowHiddenCodex: true` or a one-time approval.
+- `ghostty-visible` is the preferred default when `PREFER_GHOSTTY=true`. It writes `.vibe-codex/runs/<runId>/prompt.md`, `run-codex.sh`, `codex.log`, and `metadata.json`, then opens Ghostty when available and falls back to macOS Terminal.
+- `terminal-visible` uses the same supervised script but opens macOS Terminal directly.
 - `app-supervised` opens `codex app <workspace>`, writes the prompt file, and copies the prompt to the clipboard with `pbcopy` when available. Paste it into the Codex app manually.
+- `codex-app-thread` is experimental. It uses configured Codex app-server HTTP APIs when `CODEX_APP_SERVER_URL` is set and reachable. If unavailable, tools return a clear error recommending `ghostty-visible`.
+- `exec-hidden` runs `codex exec` synchronously and returns captured stdout/stderr. It is not the default and requires `allowHiddenCodex: true` or a one-time approval.
 
-Generated visible scripts write `__VIBE_CODEX_RUN_EXIT_CODE=<code>` and `__VIBE_CODEX_RUN_FINISHED__` markers to the log. `collect_visible_run_result` uses those markers and failure strings to report `completed_visible`, `failed_visible`, or the current run status. It also compares current `git status --short` against the run baseline and returns `newChangedFilesSinceRun`.
+Generated visible scripts print the exact prompt, run ID, workspace, prompt path, log path, execution mode, terminal app, and redacted Codex command before Codex starts. The script waits at `Press Enter to start Codex, or Ctrl+C to cancel.` Ctrl+C cancels before start or interrupts Codex after start; output is written live to `codex.log`.
+
+Visible scripts write `**VIBE_CODEX_RUN_STARTED**`, `__VIBE_CODEX_RUN_EXIT_CODE=<code>`, and `**VIBE_CODEX_RUN_FINISHED**` markers. `collect_visible_run_result` treats finished exit code `0` as `completed_visible` even if the log contains non-fatal warning text. It also compares current `git status --short` against the run baseline and returns `changedFilesSinceRun`, `newChangedFilesSinceRun`, `gitStatus`, `gitDiff`, artifact paths, execution mode, terminal app, and `doNotFallbackToDirectWrite: true`.
+
+Ghostty configuration:
+
+```env
+TERMINAL_APP=ghostty
+TERMINAL_FALLBACK_APP=Terminal
+PREFER_GHOSTTY=true
+```
+
+Experimental app-thread configuration:
+
+```env
+CODEX_APP_SERVER_URL=http://127.0.0.1:<port>
+```
+
+Vibe Codex does not GUI-automate Codex Desktop. App-thread tools only call app-server APIs when they are explicitly configured and reachable.
 
 ## Approval Gates
 
@@ -263,7 +291,8 @@ Blocked commands never run. Dangerous commands are not executed. Normal commands
 ## Known Limitations
 
 - Experimental OAuth tokens/codes are in-memory and reset when the relay restarts.
-- v0.2 uses `codex exec`, not true Codex desktop thread control.
+- `ghostty-visible` and `terminal-visible` use `codex exec`, not true Codex desktop thread control.
+- `codex-app-thread` is experimental and requires an external Codex app-server URL; when unavailable, use `ghostty-visible`.
 - Continuation is approximated through saved run context.
 - No live streaming yet.
 - No graphical approval UI yet; approvals are MCP tool calls.

@@ -115,6 +115,7 @@ describe("experimental OAuth", () => {
     ctx.config.oauthRequireLocalApproval = true;
     const clientId = await registerClient();
     const verifier = randomBytes(32).toString("base64url");
+    const resource = `${baseUrl}/mcp?note=<script>alert(1)</script>`;
     const params = new URLSearchParams({
       response_type: "code",
       client_id: clientId,
@@ -123,7 +124,7 @@ describe("experimental OAuth", () => {
       code_challenge_method: "S256",
       state: "local",
       scope: "mcp",
-      resource: `${baseUrl}/mcp`,
+      resource,
     });
     const page = await fetch(`${baseUrl}/authorize?${params}`);
     const html = await page.text();
@@ -135,7 +136,14 @@ describe("experimental OAuth", () => {
     expect(html).toContain(clientId);
     expect(html).toContain("chatgpt.com");
     expect(html).toContain("<code>mcp</code>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).not.toContain("<script>alert(1)</script>");
     expect(html).toContain("1 hour");
+    expect(html).toContain(`name="client_id" value="${clientId}"`);
+    expect(html).toContain('name="response_type" value="code"');
+    expect(html).toContain('name="code_challenge_method" value="S256"');
+    expect(html).toContain('name="action" value="approve"');
+    expect(html).toContain('name="action" value="reject"');
     expect(html).not.toContain("test-token");
     expect(html).not.toContain("vibe_url_token_that_should_not_render");
     expect(html).not.toContain("vibe_oauth_");

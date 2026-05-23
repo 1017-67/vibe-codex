@@ -47,7 +47,7 @@ http://127.0.0.1:8787/authorize?response_type=code&client_id=<CLIENT_ID>&redirec
 
 Approve locally, copy the returned `code`, then exchange:
 
-The approval page is a local Vibe Codex pairing screen. It shows the registered client ID, redirect host, requested scopes, resource, issuer, and token lifetime. It does not display access tokens, authorization codes, relay tokens, URL tokens, `code_verifier`, or the full redirect URI; hidden OAuth form fields are preserved so approve/reject still complete the same flow.
+The approval page is a local Vibe Codex pairing screen with a centered card, connection details, and a permissions/safety panel. It shows the registered client ID, redirect host, requested scopes, resource, issuer base URL, and token lifetime. It does not display access tokens, authorization codes, relay tokens, URL tokens, `code_verifier`, or the full redirect URI in the visible details; hidden OAuth form fields are preserved so approve/reject still complete the same flow.
 
 ```bash
 curl -X POST http://127.0.0.1:8787/token \

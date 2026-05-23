@@ -8,7 +8,8 @@ Security hardening checks:
 - OAuth `/register` is only available when `ENABLE_EXPERIMENTAL_OAUTH=true` and is rate-limited.
 - MCP initialize floods eventually return `429`.
 - `run_workspace_command` blocks `sudo`, secret reads, inline interpreters such as `node -e` / `python -c`, shell substitutions, and pipes into interpreters.
-- Visible terminal scripts quote generated paths/messages and write `__VIBE_CODEX_RUN_FINISHED__`.
+- Visible terminal scripts quote generated paths/messages, show the exact prompt before start, and write `**VIBE_CODEX_RUN_FINISHED**`.
+- `detect_codex_app_server` returns a clear unavailable result unless `CODEX_APP_SERVER_URL` is configured and reachable.
 
 ## Local Build
 
@@ -59,7 +60,32 @@ Call `relay_health`, then `connector_setup_status`.
 ## Visible Codex Run
 
 1. Call `create_workspace` with `initGit: true`.
-2. Call `start_codex_task` with default `executionMode` (`terminal-visible`) and a task that creates one file.
+2. Call `start_codex_task` with default `executionMode` (`ghostty-visible` when `PREFER_GHOSTTY=true`) and a task that creates one file.
+3. Watch Ghostty open. If Ghostty is unavailable, Vibe Codex falls back to macOS Terminal.
+4. Confirm the window shows run ID, workspace, prompt path, log path, execution mode, redacted Codex command, and the full prompt.
+5. Press Enter to start, or press Ctrl+C to cancel.
+6. Let Codex complete.
+7. Call `collect_visible_run_result`.
+8. Confirm:
+   - `status` is `completed_visible`.
+   - `executionMode` is `ghostty-visible` or `terminal-visible`.
+   - `terminalApp` is present.
+   - `newChangedFilesSinceRun` contains the created file.
+   - `gitStatus`, `gitDiff`, `promptPath`, `scriptPath`, and `logPath` are present.
+   - `doNotFallbackToDirectWrite` is `true`.
+
+## App-Thread Detection
+
+1. Call `detect_codex_app_server`.
+2. If `CODEX_APP_SERVER_URL` is unset, confirm:
+   - `available` is `false`.
+   - result recommends `ghostty-visible`.
+3. If a Codex app-server is configured, call `list_codex_threads`, then `start_codex_app_thread` against a safe workspace.
+
+## Legacy Terminal Visible Run
+
+1. Call `create_workspace` with `initGit: true`.
+2. Call `start_codex_task` with `executionMode: "terminal-visible"` and a task that creates one file.
 3. Watch the Terminal window complete.
 4. Call `collect_visible_run_result`.
 5. Confirm:

@@ -78,6 +78,14 @@ function redirectHost(redirectUri: string): string {
   }
 }
 
+function displayOrigin(value: string): string {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return value;
+  }
+}
+
 function readableDuration(seconds: number): string {
   if (seconds % 86_400 === 0) return `${seconds / 86_400} ${seconds / 86_400 === 1 ? "day" : "days"}`;
   if (seconds % 3_600 === 0) return `${seconds / 3_600} ${seconds / 3_600 === 1 ? "hour" : "hours"}`;
@@ -112,8 +120,9 @@ function renderAuthorizePage(args: {
     scope: args.scope,
     resource: args.resource,
   });
-  const issuer = redactSecrets(args.config, args.issuer) ?? args.issuer;
+  const issuer = redactSecrets(args.config, displayOrigin(args.issuer)) ?? displayOrigin(args.issuer);
   const resource = args.resource ? (redactSecrets(args.config, args.resource) ?? args.resource) : "Not specified";
+  const scopes = args.scope.trim() || "mcp";
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -217,7 +226,7 @@ function renderAuthorizePage(args: {
   .safety-divider { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin: 10px 0 4px; }
   .warning { font-size: 13px; margin-bottom: 10px; }
   .buttons { display: flex; gap: 10px; margin-top: 20px; }
-  form { flex: 1; display: flex; }
+  .button-form { flex: 1; display: flex; }
   .btn {
     flex: 1;
     padding: 10px 0;
@@ -247,7 +256,7 @@ function renderAuthorizePage(args: {
     <div class="panel-title">Connection details</div>
     <div class="detail-row"><span class="detail-label">Client ID</span><span class="detail-value"><code>${escapeHtml(args.clientId)}</code></span></div>
     <div class="detail-row"><span class="detail-label">Redirect host</span><span class="detail-value"><code>${escapeHtml(redirectHost(args.redirectUri))}</code></span></div>
-    <div class="detail-row"><span class="detail-label">Scopes</span><span class="detail-value"><code>${escapeHtml(args.scope)}</code></span></div>
+    <div class="detail-row"><span class="detail-label">Scopes</span><span class="detail-value"><code>${escapeHtml(scopes)}</code></span></div>
     <div class="detail-row"><span class="detail-label">Resource</span><span class="detail-value"><code>${escapeHtml(resource)}</code></span></div>
     <div class="detail-row"><span class="detail-label">Token lifetime</span><span class="detail-value">${escapeHtml(readableDuration(args.config.oauthAccessTokenTtlSeconds))}</span></div>
     <div class="detail-row"><span class="detail-label">Issuer</span><span class="detail-value"><code>${escapeHtml(issuer)}</code></span></div>
@@ -270,12 +279,14 @@ function renderAuthorizePage(args: {
     </ul>
   </div>
   <div class="buttons">
-    <form method="POST" action="/authorize">
+    <form method="POST" action="/authorize" class="button-form">
       ${hidden}
+      <input type="hidden" name="action" value="reject">
       <button name="decision" value="reject" type="submit" class="btn btn-reject">Reject</button>
     </form>
-    <form method="POST" action="/authorize">
+    <form method="POST" action="/authorize" class="button-form">
       ${hidden}
+      <input type="hidden" name="action" value="approve">
       <button name="decision" value="approve" type="submit" class="btn btn-approve">Approve connection</button>
     </form>
   </div>
