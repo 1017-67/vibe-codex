@@ -61,17 +61,19 @@ Call `relay_health`, then `connector_setup_status`.
 
 1. Call `create_workspace` with `initGit: true`.
 2. Call `start_codex_task` with default `executionMode` (`ghostty-visible` when `PREFER_GHOSTTY=true`) and a task that creates one file.
-3. Watch Ghostty open. If Ghostty is unavailable, Vibe Codex falls back to macOS Terminal.
-4. Confirm the window shows run ID, workspace, prompt path, log path, execution mode, redacted Codex command, and the full prompt.
-5. Press Enter to start, or press Ctrl+C to cancel.
-6. Let Codex complete.
-7. Call `collect_visible_run_result`.
-8. Confirm:
-   - `status` is `completed_visible`.
-   - `executionMode` is `ghostty-visible` or `terminal-visible`.
+3. Confirm the tool returns `status: "interactive_ready"`, `promptPath`, and `copiedToClipboard`.
+4. Watch Ghostty open normal interactive `codex`. If Ghostty is unavailable, Vibe Codex falls back to macOS Terminal.
+5. Paste the copied prompt into Codex manually. No generated `run-codex.sh`, `codex.log`, hidden exec, or `codex exec` should be used for `ghostty-visible`.
+6. Chat normally, approve or reject Codex prompts, and use Ctrl+C if you want to interrupt.
+7. Let Codex create the requested file.
+8. Call `collect_visible_run_result`.
+9. Confirm:
+   - `status` is `completed_visible` after file changes appear, or `unknown_interactive` if no completion can be inferred yet.
+   - `executionMode` is `ghostty-visible`.
    - `terminalApp` is present.
    - `newChangedFilesSinceRun` contains the created file.
-   - `gitStatus`, `gitDiff`, `promptPath`, `scriptPath`, and `logPath` are present.
+   - `gitStatus`, `gitDiff`, and `promptPath` are present.
+   - `scriptPath` and `logPath` are absent for `ghostty-visible`.
    - `doNotFallbackToDirectWrite` is `true`.
 
 ## App-Thread Detection
@@ -86,7 +88,7 @@ Call `relay_health`, then `connector_setup_status`.
 
 1. Call `create_workspace` with `initGit: true`.
 2. Call `start_codex_task` with `executionMode: "terminal-visible"` and a task that creates one file.
-3. Watch the Terminal window complete.
+3. Watch the generated Terminal script complete.
 4. Call `collect_visible_run_result`.
 5. Confirm:
    - `status` is `completed_visible`.

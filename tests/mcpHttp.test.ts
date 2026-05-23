@@ -227,6 +227,31 @@ describe("MCP Streamable HTTP sessions", () => {
     expect(payload.result.structuredContent.doNotFallbackToDirectWrite).toBe(true);
   });
 
+  it("start_codex_task defaults to ghostty-visible and approval-gates before launch when required", async () => {
+    ctx.config.requireApprovalForCodexVisible = true;
+    const workspace = `${ctx.root}/ghostty-default`;
+    await import("node:fs/promises").then((fs) => fs.mkdir(workspace));
+    await import("../src/util/spawn.js").then(({ runProcessArgv }) => runProcessArgv({ file: "git", args: ["init"], cwd: workspace }));
+    const init = await initialize();
+    await (await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId!)).text();
+    const response = await postMcp({
+      jsonrpc: "2.0",
+      id: 16,
+      method: "tools/call",
+      params: {
+        name: "start_codex_task",
+        arguments: {
+          workspacePath: workspace,
+          userGoal: "Prepare an interactive Codex task",
+        },
+      },
+    }, init.sessionId!);
+    const payload = parseMcpResponse(await response.text());
+    expect(response.status).toBe(200);
+    expect(payload.result.structuredContent.approvalRequired).toBe(true);
+    expect(payload.result.structuredContent.actionSummary.executionMode).toBe("ghostty-visible");
+  });
+
   it("detect_codex_app_server reports unavailable through MCP", async () => {
     const init = await initialize();
     await (await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId!)).text();

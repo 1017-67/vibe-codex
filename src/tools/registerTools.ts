@@ -13,7 +13,7 @@ import { runWorkspaceCommand } from "../workspace/commands.js";
 import { gitDiff, gitStatus } from "../workspace/git.js";
 import { openCodexApp } from "../codex/codexApp.js";
 import { compileCodexPrompt } from "../codex/promptCompiler.js";
-import { collectVisibleRunResult, continueCodexTask, ExecutionMode, startAppSupervisedCodexTask, startCodexExecTask, startTerminalVisibleCodexTask } from "../codex/codexExec.js";
+import { collectVisibleRunResult, continueCodexTask, ExecutionMode, startAppSupervisedCodexTask, startCodexExecTask, startGhosttyInteractiveCodexTask, startTerminalVisibleCodexTask } from "../codex/codexExec.js";
 import { continueCodexAppThread, detectCodexAppServer, forkCodexAppThread, getCodexAppThreadStatus, listCodexThreads, resumeCodexAppThread, startCodexAppThread } from "../codex/codexAppServerStub.js";
 import { RunStore } from "../runs/runStore.js";
 import { VibeError, toErrorPayload } from "../util/errors.js";
@@ -297,7 +297,35 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     if (!args.skipGitRepoCheckAllowed) await assertGitWorkspace(workspacePath);
     const prompt = compileCodexPrompt({ workspacePath, userGoal: args.userGoal, context: args.context, constraints: args.constraints, nonGoals: args.nonGoals, acceptanceCriteria: args.acceptanceCriteria, verification: args.verification, autonomy });
 
-    if (executionMode === "terminal-visible" || executionMode === "ghostty-visible") {
+    if (executionMode === "ghostty-visible") {
+      if (!(await checkCodexAvailable(config))) throw new VibeError("CODEX_NOT_AVAILABLE", "Codex CLI is not available.", { codexBin: config.codexBin });
+      const approval = maybeApproval("codex-visible", "Interactive Codex execution requires local approval.", {
+        tool: "start_codex_task",
+        executionMode,
+        workspacePath,
+        userGoal: args.userGoal,
+        autonomy,
+      });
+      if (approval) return approval;
+      const run = await startGhosttyInteractiveCodexTask({ workspacePath, prompt, autonomy, config, runStore });
+      return {
+        runId: run.id,
+        status: run.status,
+        executionMode,
+        terminalApp: run.metadata?.terminalApp,
+        workspacePath,
+        promptPath: run.metadata?.promptPath,
+        copiedToClipboard: run.metadata?.copiedToClipboard === true,
+        launchedCodexDirectly: run.metadata?.launchedCodexDirectly === true,
+        requiresVisibleSupervision: true,
+        doNotFallbackToDirectWrite: true,
+        message: run.metadata?.launchedCodexDirectly === true
+          ? "Ghostty opened normal Codex. The prompt was copied to clipboard; paste it into Codex to start. No script or hidden exec was used."
+          : `${String(run.metadata?.terminalApp ?? "Terminal")} opened in the workspace and the prompt was copied to clipboard. Type \`codex\`, then paste the prompt into Codex to start. No script or hidden exec was used.`,
+      };
+    }
+
+    if (executionMode === "terminal-visible") {
       if (!(await checkCodexAvailable(config))) throw new VibeError("CODEX_NOT_AVAILABLE", "Codex CLI is not available.", { codexBin: config.codexBin });
       const approval = maybeApproval("codex-visible", "Visible Codex execution requires local approval.", {
         tool: "start_codex_task",
@@ -320,9 +348,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
         scriptPath: run.metadata?.scriptPath,
         requiresVisibleSupervision: true,
         doNotFallbackToDirectWrite: true,
-        message: executionMode === "ghostty-visible"
-          ? "Codex is staged in Ghostty when available, falling back to macOS Terminal. The terminal shows the exact prompt and waits for Enter before starting. Ctrl+C cancels or stops the run."
-          : "Codex is staged in a macOS Terminal window. The terminal shows the exact prompt and waits for Enter before starting. Ctrl+C cancels or stops the run.",
+        message: "Codex is staged in a macOS Terminal window using the legacy visible script. The terminal shows the exact prompt and waits for Enter before starting. Ctrl+C cancels or stops the run.",
       };
     }
 
@@ -444,7 +470,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
   }));
 
   server.registerTool("collect_visible_run_result", {
-    description: "Collect prompt/log/git status/git diff for a terminal-visible or app-supervised Vibe Codex run.",
+    description: "Collect prompt/log/git status/git diff for a visible or interactive Vibe Codex run.",
     inputSchema: z.object({ runId: z.string(), maxBytes: z.number().int().positive().max(1_000_000).optional() }),
   }, async (args) => safeTool(async () => collectVisibleRunResult({ runId: args.runId, config, runStore, maxBytes: args.maxBytes })));
 

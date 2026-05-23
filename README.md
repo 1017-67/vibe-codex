@@ -209,15 +209,19 @@ Dynamic client registration remains unauthenticated when experimental OAuth is e
 
 `start_codex_task` accepts `executionMode`:
 
-- `ghostty-visible` is the preferred default when `PREFER_GHOSTTY=true`. It writes `.vibe-codex/runs/<runId>/prompt.md`, `run-codex.sh`, `codex.log`, and `metadata.json`, then opens Ghostty when available and falls back to macOS Terminal.
-- `terminal-visible` uses the same supervised script but opens macOS Terminal directly.
+- `ghostty-visible` is the preferred default when `PREFER_GHOSTTY=true`. It writes `.vibe-codex/runs/<runId>/prompt.md` and metadata, copies the full prompt to the clipboard with `pbcopy` when available, then opens normal interactive `codex` in Ghostty. Paste the prompt into Codex manually so the chat stays visible and under your control. No `run-codex.sh`, `codex.log`, hidden exec, or `codex exec` is used in this mode.
+- `terminal-visible` is the legacy supervised script mode. It writes `run-codex.sh` and `codex.log`, then opens macOS Terminal directly.
 - `app-supervised` opens `codex app <workspace>`, writes the prompt file, and copies the prompt to the clipboard with `pbcopy` when available. Paste it into the Codex app manually.
 - `codex-app-thread` is experimental. It uses configured Codex app-server HTTP APIs when `CODEX_APP_SERVER_URL` is set and reachable. If unavailable, tools return a clear error recommending `ghostty-visible`.
 - `exec-hidden` runs `codex exec` synchronously and returns captured stdout/stderr. It is not the default and requires `allowHiddenCodex: true` or a one-time approval.
 
-Generated visible scripts print the exact prompt, run ID, workspace, prompt path, log path, execution mode, terminal app, and redacted Codex command before Codex starts. The script waits at `Press Enter to start Codex, or Ctrl+C to cancel.` Ctrl+C cancels before start or interrupts Codex after start; output is written live to `codex.log`.
+In `ghostty-visible`, Vibe Codex launches normal interactive Codex rather than sending the prompt automatically. The terminal remains yours: paste the copied prompt, chat normally, approve or reject Codex prompts, and press Ctrl+C whenever you want to interrupt.
 
-Visible scripts write `**VIBE_CODEX_RUN_STARTED**`, `__VIBE_CODEX_RUN_EXIT_CODE=<code>`, and `**VIBE_CODEX_RUN_FINISHED**` markers. `collect_visible_run_result` treats finished exit code `0` as `completed_visible` even if the log contains non-fatal warning text. It also compares current `git status --short` against the run baseline and returns `changedFilesSinceRun`, `newChangedFilesSinceRun`, `gitStatus`, `gitDiff`, artifact paths, execution mode, terminal app, and `doNotFallbackToDirectWrite: true`.
+When Ghostty supports direct command launch, Vibe Codex opens Ghostty with normal `codex` already running in the workspace. If that launch style is unavailable, it opens Ghostty in the workspace and returns a message telling you to type `codex` before pasting the copied prompt. If Ghostty itself is unavailable, Vibe Codex falls back to macOS Terminal.
+
+In legacy `terminal-visible`, the generated script prints the exact prompt, run ID, workspace, prompt path, log path, execution mode, terminal app, and redacted Codex command before Codex starts. The script waits at `Press Enter to start Codex, or Ctrl+C to cancel.` Ctrl+C cancels before start or interrupts Codex after start; output is written live to `codex.log`.
+
+Legacy visible scripts write `**VIBE_CODEX_RUN_STARTED**`, `__VIBE_CODEX_RUN_EXIT_CODE=<code>`, and `**VIBE_CODEX_RUN_FINISHED**` markers. `collect_visible_run_result` treats finished exit code `0` as `completed_visible` even if the log contains non-fatal warning text. For interactive `ghostty-visible`, collection does not expect a log; it compares current `git status --short` against the run baseline and reports `completed_visible` when changed files appeared, or `unknown_interactive` when there is no reliable completion signal yet. Results include `changedFilesSinceRun`, `newChangedFilesSinceRun`, `gitStatus`, `gitDiff`, artifact paths, execution mode, terminal app, and `doNotFallbackToDirectWrite: true`.
 
 Ghostty configuration:
 
@@ -291,7 +295,8 @@ Blocked commands never run. Dangerous commands are not executed. Normal commands
 ## Known Limitations
 
 - Experimental OAuth tokens/codes are in-memory and reset when the relay restarts.
-- `ghostty-visible` and `terminal-visible` use `codex exec`, not true Codex desktop thread control.
+- `ghostty-visible` launches normal interactive Codex in Ghostty and relies on manual paste/control; completion is inferred from workspace changes.
+- `terminal-visible` uses `codex exec` through the legacy visible script.
 - `codex-app-thread` is experimental and requires an external Codex app-server URL; when unavailable, use `ghostty-visible`.
 - Continuation is approximated through saved run context.
 - No live streaming yet.
