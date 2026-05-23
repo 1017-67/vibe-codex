@@ -29,6 +29,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const urlTokenRequiredPrefix = env.URL_TOKEN_REQUIRED_PREFIX ?? "vibe_";
   const urlTokenMinLength = int(env.URL_TOKEN_MIN_LENGTH, 32);
   const urlTokenExpiresAt = env.URL_TOKEN_EXPIRES_AT || undefined;
+  const enableExperimentalOAuth = bool(env.ENABLE_EXPERIMENTAL_OAUTH, false);
 
   if (!relayToken && !developmentMode && !disableAuth) {
     throw new VibeError("CONFIG_ERROR", "RELAY_TOKEN is required unless VIBE_CODEX_DEV=true or NODE_ENV=test.");
@@ -66,6 +67,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     developmentMode,
     allowedRoots,
     defaultParentDir,
+    publicBaseUrl: env.PUBLIC_BASE_URL || undefined,
     codexBin: env.CODEX_BIN || "codex",
     databasePath: path.resolve(env.DATABASE_PATH ?? "./vibe-codex.sqlite"),
     defaultCodexApproval: env.DEFAULT_CODEX_APPROVAL || "untrusted",
@@ -78,5 +80,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     requireApprovalForCodexHidden: bool(env.REQUIRE_APPROVAL_FOR_CODEX_HIDDEN, true),
     requireApprovalForWriteFile: bool(env.REQUIRE_APPROVAL_FOR_WRITE_FILE, false),
     requireApprovalForNormalCommands: bool(env.REQUIRE_APPROVAL_FOR_NORMAL_COMMANDS, false),
+    enableExperimentalOAuth,
+    oauthIssuerBaseUrl: env.OAUTH_ISSUER_BASE_URL || undefined,
+    oauthAccessTokenTtlSeconds: int(env.OAUTH_ACCESS_TOKEN_TTL_SECONDS, 3600),
+    oauthAuthCodeTtlSeconds: int(env.OAUTH_AUTH_CODE_TTL_SECONDS, 300),
+    oauthAllowedRedirectHosts: (env.OAUTH_ALLOWED_REDIRECT_HOSTS ?? "chat.openai.com,chatgpt.com").split(",").map((host) => host.trim()).filter(Boolean),
+    oauthRequireLocalApproval: bool(env.OAUTH_REQUIRE_LOCAL_APPROVAL, true),
   };
 }

@@ -4,6 +4,8 @@ import { createMcpServer } from "../src/server/mcpServer.js";
 import { createHttpApp } from "../src/server/http.js";
 import { initRunStore, RunStore } from "../src/runs/runStore.js";
 import { tempConfig } from "./helpers.js";
+import { ApprovalStore } from "../src/approvals/actionPolicy.js";
+import { AuthSessionStore } from "../src/server/authSessions.js";
 
 let ctx: Awaited<ReturnType<typeof tempConfig>>;
 let store: RunStore;
@@ -51,7 +53,8 @@ beforeEach(async () => {
   ctx.config.disableAuth = false;
   ctx.config.relayToken = "test-token";
   store = initRunStore(ctx.config.databasePath);
-  const app = createHttpApp(ctx.config, () => createMcpServer(ctx.config, store));
+  const stores = { approvals: new ApprovalStore(), authSessions: new AuthSessionStore() };
+  const app = createHttpApp(ctx.config, () => createMcpServer(ctx.config, store, stores), stores.authSessions);
   httpServer = app.listen(0);
   const address = httpServer.address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${address.port}`;
@@ -180,6 +183,7 @@ describe("MCP Streamable HTTP sessions", () => {
   it("hidden Codex requires allowHiddenCodex or approval", async () => {
     const workspace = `${ctx.root}/hidden-codex`;
     await import("node:fs/promises").then((fs) => fs.mkdir(workspace));
+    await import("../src/util/spawn.js").then(({ runProcessArgv }) => runProcessArgv({ file: "git", args: ["init"], cwd: workspace }));
     const init = await initialize();
     await (await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId!)).text();
     const response = await postMcp({
@@ -200,5 +204,29 @@ describe("MCP Streamable HTTP sessions", () => {
     expect(payload.result.structuredContent.approvalRequired).toBe(true);
     expect(payload.result.structuredContent.approvalId).toBeTruthy();
     expect(payload.result.structuredContent.doNotFallbackToDirectWrite).toBe(true);
+  });
+
+  it("start_codex_task fails clearly when workspace is not Git", async () => {
+    const workspace = `${ctx.root}/not-git`;
+    await import("node:fs/promises").then((fs) => fs.mkdir(workspace));
+    const init = await initialize();
+    await (await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId!)).text();
+    const response = await postMcp({
+      jsonrpc: "2.0",
+      id: 16,
+      method: "tools/call",
+      params: {
+        name: "start_codex_task",
+        arguments: {
+          workspacePath: workspace,
+          userGoal: "Say hello",
+          executionMode: "terminal-visible",
+        },
+      },
+    }, init.sessionId!);
+    const payload = parseMcpResponse(await response.text());
+    expect(payload.result.isError).toBe(true);
+    expect(payload.result.structuredContent.error.message).toContain("not a Git repository");
+    expect(payload.result.structuredContent.error.message).toContain("will not auto-use --skip-git-repo-check");
   });
 });

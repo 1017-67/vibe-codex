@@ -12,6 +12,7 @@ export interface Config {
   developmentMode: boolean;
   allowedRoots: string[];
   defaultParentDir: string;
+  publicBaseUrl?: string;
   codexBin: string;
   databasePath: string;
   defaultCodexApproval: string;
@@ -24,6 +25,12 @@ export interface Config {
   requireApprovalForCodexHidden: boolean;
   requireApprovalForWriteFile: boolean;
   requireApprovalForNormalCommands: boolean;
+  enableExperimentalOAuth: boolean;
+  oauthIssuerBaseUrl?: string;
+  oauthAccessTokenTtlSeconds: number;
+  oauthAuthCodeTtlSeconds: number;
+  oauthAllowedRedirectHosts: string[];
+  oauthRequireLocalApproval: boolean;
 }
 
 export const AUTONOMY_LEVELS: AutonomyLevel[] = ["manual", "workspace", "build-test", "full-project"];

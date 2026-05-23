@@ -3,6 +3,8 @@ import { loadConfig } from "../src/config/loadConfig.js";
 import { createMcpServer } from "../src/server/mcpServer.js";
 import { initRunStore } from "../src/runs/runStore.js";
 import { tempConfig } from "./helpers.js";
+import { ApprovalStore } from "../src/approvals/actionPolicy.js";
+import { AuthSessionStore } from "../src/server/authSessions.js";
 
 describe("smoke", () => {
   it("loads config in development mode", () => {
@@ -15,7 +17,7 @@ describe("smoke", () => {
     const ctx = await tempConfig();
     try {
       const store = initRunStore(ctx.config.databasePath);
-      const server = createMcpServer(ctx.config, store);
+      const server = createMcpServer(ctx.config, store, { approvals: new ApprovalStore(), authSessions: new AuthSessionStore() });
       expect(server).toBeTruthy();
       store.db.close();
     } finally {

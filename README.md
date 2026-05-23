@@ -60,6 +60,12 @@ REQUIRE_APPROVAL_FOR_CODEX_VISIBLE=false
 REQUIRE_APPROVAL_FOR_CODEX_HIDDEN=true
 REQUIRE_APPROVAL_FOR_WRITE_FILE=false
 REQUIRE_APPROVAL_FOR_NORMAL_COMMANDS=false
+ENABLE_EXPERIMENTAL_OAUTH=false
+OAUTH_ISSUER_BASE_URL=
+OAUTH_ACCESS_TOKEN_TTL_SECONDS=3600
+OAUTH_AUTH_CODE_TTL_SECONDS=300
+OAUTH_ALLOWED_REDIRECT_HOSTS=chat.openai.com,chatgpt.com
+OAUTH_REQUIRE_LOCAL_APPROVAL=true
 ```
 
 `RELAY_TOKEN` is required unless you explicitly run in development mode. `ALLOWED_ROOTS` defines the only directories Vibe Codex can touch. `DEFAULT_PARENT_DIR` is where new workspaces are created by default.
@@ -137,11 +143,28 @@ https://<ngrok-url>/mcp?vibe_token=<URL_TOKEN>
 
 Bearer auth on `/mcp` remains supported and is preferred whenever the client can send static headers.
 
-ChatGPT Developer Mode currently may only offer OAuth, No auth, and Mixed auth. Until OAuth is implemented, use `Authentication: No auth` with the secret URL-token route for development testing.
+Experimental OAuth is also available, disabled by default:
+
+```env
+ENABLE_EXPERIMENTAL_OAUTH=true
+OAUTH_ISSUER_BASE_URL=https://<ngrok-url>
+OAUTH_REQUIRE_LOCAL_APPROVAL=true
+```
+
+ChatGPT Developer Mode OAuth settings:
+
+```text
+Authentication: OAuth
+MCP URL: https://<ngrok-url>/mcp
+```
+
+Vibe Codex exposes OAuth metadata, `/authorize`, `/token`, and `/register`. The flow is local-owner approval with PKCE S256 and opaque in-memory access tokens. URL-token auth remains the simpler development fallback.
 
 ## Tools
 
 - `relay_health`
+- `connector_setup_status`
+- `get_connector_url`
 - `list_projects`
 - `create_workspace`
 - `list_files`
@@ -155,8 +178,10 @@ ChatGPT Developer Mode currently may only offer OAuth, No auth, and Mixed auth. 
 - `git_status`
 - `git_diff`
 - `collect_visible_run_result`
+- `list_recent_runs`
 - `approve_action`
 - `reject_action`
+- `list_pending_approvals`
 
 ## Codex Execution Modes
 
@@ -204,9 +229,10 @@ ChatGPT calls:
 1. create_workspace
 2. open_in_codex_app
 3. start_codex_task
-4. git_status
-5. git_diff
-6. continue_codex_task if needed
+4. collect_visible_run_result
+5. git_status
+6. git_diff
+7. continue_codex_task if needed
 ```
 
 ## Autonomy Levels
@@ -220,6 +246,7 @@ Blocked commands never run. Dangerous commands are not executed. Normal commands
 
 ## Known Limitations
 
+- Experimental OAuth tokens/codes are in-memory and reset when the relay restarts.
 - v0.2 uses `codex exec`, not true Codex desktop thread control.
 - Continuation is approximated through saved run context.
 - No live streaming yet.

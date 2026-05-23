@@ -16,3 +16,9 @@ export async function gitDiff(workspacePath: string, config: Config, maxBytes?: 
   const cwd = await assertSafeWorkspacePath(workspacePath, config);
   return runProcessArgv({ file: "git", args: ["diff", "--no-ext-diff"], cwd, timeoutMs: config.commandTimeoutMs, maxOutputBytes: maxBytes ?? config.maxCommandOutputBytes });
 }
+
+export async function gitIsRepository(workspacePath: string, config: Config): Promise<boolean> {
+  const cwd = await assertSafeWorkspacePath(workspacePath, config);
+  const result = await runProcessArgv({ file: "git", args: ["rev-parse", "--is-inside-work-tree"], cwd, timeoutMs: config.commandTimeoutMs, maxOutputBytes: 20_000 });
+  return result.exitCode === 0 && result.stdout.trim() === "true";
+}

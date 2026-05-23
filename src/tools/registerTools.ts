@@ -5,6 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Config, AutonomyLevel, AUTONOMY_LEVELS } from "../config/types.js";
 import { canRunCodex, canWriteFiles } from "../safety/approvals.js";
 import { ApprovalStore, ActionRisk, approvalRequired, requiresApproval } from "../approvals/actionPolicy.js";
+import { AuthSessionStore } from "../server/authSessions.js";
 import { checkCodexAvailable, getCodexVersion } from "../codex/codexCli.js";
 import { createWorkspace as createWorkspaceImpl, WorkspaceTemplate } from "../workspace/createWorkspace.js";
 import { listFiles, readFile, writeFile } from "../workspace/files.js";
@@ -17,6 +18,8 @@ import { RunStore } from "../runs/runStore.js";
 import { VibeError, toErrorPayload } from "../util/errors.js";
 import { assertSafeWorkspacePath } from "../safety/paths.js";
 import { classifyCommand } from "../safety/commandRisk.js";
+import { authWarnings, buildConnectorUrl } from "../util/connector.js";
+import { gitIsRepository } from "../workspace/git.js";
 
 const Autonomy = z.enum(AUTONOMY_LEVELS as [AutonomyLevel, ...AutonomyLevel[]]);
 const Template = z.enum(["empty", "node", "python", "vite", "next", "chrome-extension"]);
@@ -60,8 +63,8 @@ async function discoverProjects(config: Config) {
   return projects;
 }
 
-export function registerTools(server: McpServer, config: Config, runStore: RunStore) {
-  const approvalStore = new ApprovalStore();
+export function registerTools(server: McpServer, config: Config, runStore: RunStore, stores: { approvals: ApprovalStore; authSessions: AuthSessionStore }) {
+  const approvalStore = stores.approvals;
 
   function maybeApproval(actionRisk: ActionRisk, reason: string, actionSummary: Record<string, unknown>) {
     if (!requiresApproval(config, actionRisk)) return null;
@@ -69,8 +72,29 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     return approvalRequired(approvalStore.create({ reason, actionRisk, actionSummary }));
   }
 
+  server.registerResource("vibe_status", "vibe://status", {
+    title: "Vibe Codex Status",
+    description: "Minimal JSON status resource for ChatGPT connector diagnostics.",
+    mimeType: "application/json",
+  }, async (uri) => ({
+    contents: [{
+      uri: uri.href,
+      mimeType: "application/json",
+      text: JSON.stringify({
+        version: "0.2.0",
+        allowedRoots: config.allowedRoots,
+        defaultParentDir: config.defaultParentDir,
+        urlTokenAuthEnabled: config.allowUrlTokenAuth,
+        recentRuns: runStore.listRuns().slice(0, 5),
+        pendingApprovals: approvalStore.list("pending"),
+        authSessions: stores.authSessions.list(),
+        warnings: authWarnings(config),
+      }, null, 2),
+    }],
+  }));
+
   server.registerTool("relay_health", {
-    description: "Check Vibe Codex relay health and Codex CLI availability.",
+    description: "Check Vibe Codex relay health, Codex CLI availability, allowed roots, auth mode, and safety warnings.",
     inputSchema: z.object({}).optional(),
   }, async () => safeTool(async () => {
     const codexVersion = await getCodexVersion(config);
@@ -82,6 +106,60 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       allowedRoots: config.allowedRoots,
       defaultParentDir: config.defaultParentDir,
       databasePath: config.databasePath,
+      auth: {
+        bearerEnabled: !config.disableAuth,
+        urlTokenEnabled: config.allowUrlTokenAuth,
+        urlTokenExpiresAt: config.urlTokenExpiresAt,
+      },
+      warnings: authWarnings(config),
+    };
+  }));
+
+  server.registerTool("connector_setup_status", {
+    description: "Show ChatGPT connector setup status, redacted connector URL template, recent runs, pending approvals, auth sessions, and safety warnings.",
+    inputSchema: z.object({ baseUrl: z.string().url().optional(), recentRunLimit: z.number().int().min(1).max(20).optional() }).optional(),
+  }, async (args) => safeTool(async () => {
+    const baseUrl = args?.baseUrl ?? config.publicBaseUrl;
+    const recentRuns = runStore.listRuns().slice(0, args?.recentRunLimit ?? 5);
+    const pendingApprovals = approvalStore.list("pending");
+    return {
+      status: "ok",
+      version: "0.2.0",
+      chatGptDeveloperMode: {
+        authentication: "No auth",
+        mcpUrl: baseUrl ? buildConnectorUrl({ baseUrl }) : "https://<ngrok-url>/mcp/<URL_TOKEN>",
+        urlTokenAuthEnabled: config.allowUrlTokenAuth,
+      },
+      tunnel: {
+        configured: !!baseUrl,
+        publicBaseUrl: baseUrl,
+      },
+      codex: {
+        available: await checkCodexAvailable(config),
+        version: await getCodexVersion(config),
+      },
+      recentRuns,
+      pendingApprovals,
+      authSessions: stores.authSessions.list(),
+      allowedRoots: config.allowedRoots,
+      defaultParentDir: config.defaultParentDir,
+      warnings: authWarnings(config),
+      noFallbackPolicy: "Never use write_file to satisfy a failed Codex task unless the user explicitly authorizes fallback.",
+    };
+  }));
+
+  server.registerTool("get_connector_url", {
+    description: "Build a redacted ChatGPT Developer Mode MCP URL for a public tunnel base URL.",
+    inputSchema: z.object({ baseUrl: z.string().url().optional() }).optional(),
+  }, async (args) => safeTool(async () => {
+    const baseUrl = args?.baseUrl ?? config.publicBaseUrl;
+    if (!baseUrl) throw new VibeError("CONFIG_ERROR", "Provide baseUrl or set PUBLIC_BASE_URL.", {});
+    return {
+      authentication: "No auth",
+      mcpUrl: buildConnectorUrl({ baseUrl }),
+      tokenRedacted: true,
+      urlTokenAuthEnabled: config.allowUrlTokenAuth,
+      warnings: authWarnings(config),
     };
   }));
 
@@ -189,12 +267,16 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       openApp: z.boolean().optional(),
       executionMode: ExecutionModeSchema.optional(),
       allowHiddenCodex: z.boolean().optional(),
+      skipGitRepoCheckAllowed: z.boolean().optional(),
     }),
   }, async (args) => safeTool(async () => {
     const autonomy = args.autonomy ?? "workspace";
     const executionMode = (args.executionMode ?? "terminal-visible") as ExecutionMode;
     if (!canRunCodex(autonomy)) throw new VibeError("APPROVAL_REQUIRED", "Manual autonomy cannot start Codex tasks.", { autonomy });
     const workspacePath = await assertSafeWorkspacePath(args.workspacePath, config);
+    if (!args.skipGitRepoCheckAllowed && !(await gitIsRepository(workspacePath, config))) {
+      throw new VibeError("CONFIG_ERROR", "Workspace is not a Git repository. Run create_workspace with initGit=true or git init first. Vibe Codex will not auto-use --skip-git-repo-check.", { workspacePath });
+    }
     if (!(await checkCodexAvailable(config))) throw new VibeError("CODEX_NOT_AVAILABLE", "Codex CLI is not available.", { codexBin: config.codexBin });
     const prompt = compileCodexPrompt({ workspacePath, userGoal: args.userGoal, context: args.context, constraints: args.constraints, nonGoals: args.nonGoals, acceptanceCriteria: args.acceptanceCriteria, verification: args.verification, autonomy });
 
@@ -253,6 +335,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       userGoal: args.userGoal,
       autonomy,
       allowHiddenCodex: args.allowHiddenCodex === true,
+      skipGitRepoCheckAllowed: args.skipGitRepoCheckAllowed === true,
     };
     let hiddenApprovedByOneTimeApproval = false;
     if (!args.allowHiddenCodex) {
@@ -291,6 +374,14 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     description: "Collect prompt/log/git status/git diff for a terminal-visible or app-supervised Vibe Codex run.",
     inputSchema: z.object({ runId: z.string(), maxBytes: z.number().int().positive().max(1_000_000).optional() }),
   }, async (args) => safeTool(async () => collectVisibleRunResult({ runId: args.runId, config, runStore, maxBytes: args.maxBytes })));
+
+  server.registerTool("list_recent_runs", {
+    description: "List recent Vibe Codex runs with status, workspace, execution mode, and key artifact paths.",
+    inputSchema: z.object({ workspacePath: z.string().optional(), limit: z.number().int().min(1).max(50).optional() }).optional(),
+  }, async (args) => safeTool(async () => {
+    const runs = runStore.listRuns(args?.workspacePath).slice(0, args?.limit ?? 10);
+    return { runs };
+  }));
 
   server.registerTool("continue_codex_task", {
     description: "Approximate continuation by running another hidden codex exec with saved run context. Hidden Codex requires explicit approval; do not use direct write_file as fallback unless the user explicitly authorizes fallback.",
@@ -334,6 +425,11 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     if (!approval) throw new VibeError("CONFIG_ERROR", "Approval not found.", { approvalId: args.approvalId });
     return { approval };
   }));
+
+  server.registerTool("list_pending_approvals", {
+    description: "List pending Vibe Codex local approval gates.",
+    inputSchema: z.object({}).optional(),
+  }, async () => safeTool(async () => ({ approvals: approvalStore.list("pending") })));
 
   server.registerTool("reject_action", {
     description: "Reject a pending Vibe Codex local action gate.",

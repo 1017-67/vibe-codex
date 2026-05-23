@@ -17,6 +17,7 @@ export async function tempConfig(): Promise<{ config: Config; root: string; clea
     developmentMode: true,
     allowedRoots: [root],
     defaultParentDir: root,
+    publicBaseUrl: undefined,
     codexBin: "codex",
     databasePath: path.join(root, "test.sqlite"),
     defaultCodexApproval: "on-request",
@@ -29,6 +30,12 @@ export async function tempConfig(): Promise<{ config: Config; root: string; clea
     requireApprovalForCodexHidden: true,
     requireApprovalForWriteFile: false,
     requireApprovalForNormalCommands: false,
+    enableExperimentalOAuth: false,
+    oauthIssuerBaseUrl: undefined,
+    oauthAccessTokenTtlSeconds: 3600,
+    oauthAuthCodeTtlSeconds: 300,
+    oauthAllowedRedirectHosts: ["chat.openai.com", "chatgpt.com"],
+    oauthRequireLocalApproval: true,
   };
   return { config, root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }

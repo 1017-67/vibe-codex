@@ -1,6 +1,6 @@
 import { AutonomyLevel, Config } from "../config/types.js";
 
-export type AuthMethod = "bearer" | "url-token";
+export type AuthMethod = "bearer" | "url-token" | "oauth";
 
 export interface AuthSessionRecord {
   mcpSessionId: string;
@@ -9,6 +9,8 @@ export interface AuthSessionRecord {
   lastSeenAt: string;
   remoteHost?: string;
   userAgent?: string;
+  oauthTokenExpiresAt?: string;
+  oauthClientId?: string;
   allowedRoots: string[];
   defaultAutonomy: AutonomyLevel;
 }
@@ -21,6 +23,8 @@ export class AuthSessionStore {
     authMethod: AuthMethod;
     remoteHost?: string;
     userAgent?: string;
+    oauthTokenExpiresAt?: string;
+    oauthClientId?: string;
     config: Config;
   }): AuthSessionRecord {
     const now = new Date().toISOString();
@@ -31,6 +35,8 @@ export class AuthSessionStore {
       lastSeenAt: now,
       remoteHost: args.remoteHost,
       userAgent: args.userAgent,
+      oauthTokenExpiresAt: args.oauthTokenExpiresAt,
+      oauthClientId: args.oauthClientId,
       allowedRoots: args.config.allowedRoots,
       defaultAutonomy: "workspace",
     };
@@ -50,5 +56,9 @@ export class AuthSessionStore {
 
   get(mcpSessionId: string): AuthSessionRecord | undefined {
     return this.sessions.get(mcpSessionId);
+  }
+
+  list(): AuthSessionRecord[] {
+    return [...this.sessions.values()].sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
   }
 }

@@ -125,7 +125,19 @@ export async function createTerminalVisibleRunArtifacts(args: {
   const logPath = path.join(runDir, "codex.log");
   const scriptPath = path.join(runDir, "run-codex.sh");
   const baselineStatusPath = path.join(runDir, "baseline-status.txt");
+  const finalStatusPath = path.join(runDir, "final-status.txt");
+  const metadataPath = path.join(runDir, "metadata.json");
   await fs.writeFile(baselineStatusPath, args.baselineStatus ?? "", "utf8");
+  await fs.writeFile(metadataPath, JSON.stringify({
+    runId: args.runId,
+    workspacePath: args.workspacePath,
+    promptPath,
+    logPath,
+    scriptPath,
+    baselineStatusPath,
+    finalStatusPath,
+    createdAt: new Date().toISOString(),
+  }, null, 2), "utf8");
   const codexCommand = codexScriptCommand(args.config, args.capabilities, promptPath);
   const script = `#!/usr/bin/env bash
 set -euo pipefail
@@ -145,13 +157,37 @@ read
 `;
   await fs.writeFile(scriptPath, script, { encoding: "utf8", mode: 0o700 });
   await fs.chmod(scriptPath, 0o700);
-  return { runDir, promptPath, logPath, scriptPath, baselineStatusPath, script };
+  return { runDir, promptPath, logPath, scriptPath, baselineStatusPath, finalStatusPath, metadataPath, script };
 }
 
 async function createPromptOnlyRunArtifacts(workspacePath: string, runId: string, prompt: string) {
   const runDir = await ensureRunDir(workspacePath, runId);
   const promptPath = await writePrompt(runDir, prompt);
   return { runDir, promptPath };
+}
+
+async function buildUntrackedDiff(workspacePath: string, files: string[], maxBytes: number): Promise<string> {
+  let output = "";
+  for (const file of files) {
+    if (output.length >= maxBytes) break;
+    const fullPath = path.join(workspacePath, file);
+    try {
+      const stat = await fs.stat(fullPath);
+      if (!stat.isFile() || stat.size > maxBytes) continue;
+      const content = await fs.readFile(fullPath, "utf8");
+      output += [
+        `diff --git a/${file} b/${file}`,
+        "new file mode 100644",
+        "--- /dev/null",
+        `+++ b/${file}`,
+        ...content.split("\n").filter((line, index, lines) => line !== "" || index < lines.length - 1).map((line) => `+${line}`),
+        "",
+      ].join("\n");
+    } catch {
+      // Ignore files that disappear between status and collection.
+    }
+  }
+  return output.slice(0, maxBytes);
 }
 
 export async function startTerminalVisibleCodexTask(args: {
@@ -189,6 +225,8 @@ export async function startTerminalVisibleCodexTask(args: {
       logPath: artifacts.logPath,
       scriptPath: artifacts.scriptPath,
       baselineStatusPath: artifacts.baselineStatusPath,
+      finalStatusPath: artifacts.finalStatusPath,
+      metadataPath: artifacts.metadataPath,
       launchExitCode: openResult?.exitCode,
     },
   });
@@ -243,6 +281,8 @@ export async function collectVisibleRunResult(args: {
   if (!run) throw new VibeError("CONFIG_ERROR", "Run not found.", { runId: args.runId });
   const logPath = typeof run.metadata?.logPath === "string" ? run.metadata.logPath : undefined;
   const baselineStatusPath = typeof run.metadata?.baselineStatusPath === "string" ? run.metadata.baselineStatusPath : undefined;
+  const finalStatusPath = typeof run.metadata?.finalStatusPath === "string" ? run.metadata.finalStatusPath : undefined;
+  const metadataPath = typeof run.metadata?.metadataPath === "string" ? run.metadata.metadataPath : undefined;
   let log = "";
   let truncated = false;
   if (logPath) {
@@ -264,8 +304,10 @@ export async function collectVisibleRunResult(args: {
     }
   }
   const status = await gitStatus(run.workspacePath, args.config).catch(() => undefined);
-  const diff = await gitDiff(run.workspacePath, args.config, args.maxBytes ?? 80_000).catch(() => undefined);
+  const maxDiffBytes = args.maxBytes ?? 80_000;
+  const diff = await gitDiff(run.workspacePath, args.config, maxDiffBytes).catch(() => undefined);
   const statusText = status?.stdout ?? "";
+  if (finalStatusPath) await fs.writeFile(finalStatusPath, statusText, "utf8").catch(() => undefined);
   const baselineStatus = baselineStatusPath ? await fs.readFile(baselineStatusPath, "utf8").catch(() => "") : "";
   const changedFiles = statusText
     .split("\n")
@@ -280,6 +322,14 @@ export async function collectVisibleRunResult(args: {
     .map((line) => line.slice(3).trim())
     .filter((file) => !file.startsWith(".vibe-codex/")));
   const newChangedFilesSinceRun = changedFiles.filter((file) => !baselineFiles.has(file));
+  const untrackedNewFiles = statusText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("?? "))
+    .map((line) => line.slice(3).trim())
+    .filter((file) => newChangedFilesSinceRun.includes(file));
+  const untrackedDiff = await buildUntrackedDiff(run.workspacePath, untrackedNewFiles, maxDiffBytes);
+  const gitDiffSummary = [diff?.stdout ?? "", untrackedDiff].filter(Boolean).join("\n");
   const completedMarkers = ["__VIBE_CODEX_RUN_FINISHED__", "Summary of changes:", "tokens used", "Codex finished."];
   const failureMarkers = ["Not inside a trusted directory", "error:", "fatal:"];
   const completedVisible = completedMarkers.some((marker) => log.includes(marker));
@@ -288,16 +338,37 @@ export async function collectVisibleRunResult(args: {
   if (collectedStatus !== run.status && (collectedStatus === "completed_visible" || collectedStatus === "failed_visible")) {
     args.runStore.updateRun(run.id, { status: collectedStatus });
   }
+  const exitCodeMatch = log.match(/__VIBE_CODEX_RUN_EXIT_CODE=(\d+)/);
+  const visibleExitCode = exitCodeMatch ? Number.parseInt(exitCodeMatch[1], 10) : undefined;
+  if (metadataPath) {
+    await fs.writeFile(metadataPath, JSON.stringify({
+      runId: run.id,
+      workspacePath: run.workspacePath,
+      status: collectedStatus,
+      visibleExitCode,
+      promptPath: run.metadata?.promptPath,
+      logPath,
+      baselineStatusPath,
+      finalStatusPath,
+      changedFiles,
+      newChangedFilesSinceRun,
+      gitDiffSummary,
+      collectedAt: new Date().toISOString(),
+    }, null, 2), "utf8").catch(() => undefined);
+  }
   return {
     runId: run.id,
     status: collectedStatus,
+    exitCode: visibleExitCode,
     log,
     truncated,
     logPath,
     promptPath: run.metadata?.promptPath,
+    finalStatusPath,
+    metadataPath,
     baselineStatus,
     gitStatus: statusText,
-    gitDiffSummary: diff?.stdout ?? "",
+    gitDiffSummary,
     changedFiles,
     newChangedFilesSinceRun,
   };

@@ -4,7 +4,7 @@ import { AutonomyLevel, Config } from "../config/types.js";
 import { assertSafeWorkspacePath } from "../safety/paths.js";
 import { VibeError } from "../util/errors.js";
 import { generateAgentsMd } from "./agentsMd.js";
-import { gitInit } from "./git.js";
+import { gitInit, gitIsRepository } from "./git.js";
 
 export type WorkspaceTemplate = "empty" | "node" | "python" | "vite" | "next" | "chrome-extension";
 
@@ -67,7 +67,10 @@ export async function createWorkspace(args: {
   let gitInitialized = false;
   if (args.initGit) {
     const result = await gitInit(workspacePath, args.config);
-    gitInitialized = result.exitCode === 0;
+    gitInitialized = result.exitCode === 0 && await gitIsRepository(workspacePath, args.config);
+    if (!gitInitialized) {
+      throw new VibeError("CODEX_EXEC_FAILED", "git init did not produce a usable Git repository.", { workspacePath, stderr: result.stderr });
+    }
   }
 
   return { workspacePath, createdFiles, gitInitialized };

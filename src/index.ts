@@ -3,11 +3,14 @@ import { initRunStore } from "./runs/runStore.js";
 import { createMcpServer } from "./server/mcpServer.js";
 import { createHttpApp, listen } from "./server/http.js";
 import { logger } from "./util/logger.js";
+import { ApprovalStore } from "./approvals/actionPolicy.js";
+import { AuthSessionStore } from "./server/authSessions.js";
 
 async function main() {
   const config = loadConfig();
   const runStore = initRunStore(config.databasePath);
-  const app = createHttpApp(config, () => createMcpServer(config, runStore));
+  const stores = { approvals: new ApprovalStore(), authSessions: new AuthSessionStore() };
+  const app = createHttpApp(config, () => createMcpServer(config, runStore, stores), stores.authSessions);
   const httpServer = listen(config, app);
 
   process.on("SIGINT", async () => {

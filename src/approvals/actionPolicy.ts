@@ -52,6 +52,12 @@ export class ApprovalStore {
     return record;
   }
 
+  list(status?: ApprovalStatus): ApprovalRecord[] {
+    return [...this.approvals.values()]
+      .filter((record) => !status || record.status === status)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
   consumeApproved(actionRisk: ActionRisk, actionSummary: Record<string, unknown>): boolean {
     const key = actionKey(actionRisk, actionSummary);
     for (const record of this.approvals.values()) {
