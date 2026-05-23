@@ -3,6 +3,11 @@ export type AutonomyLevel = "manual" | "workspace" | "build-test" | "full-projec
 export interface Config {
   port: number;
   relayToken?: string;
+  allowUrlTokenAuth: boolean;
+  urlToken?: string;
+  urlTokenRequiredPrefix: string;
+  urlTokenMinLength: number;
+  urlTokenExpiresAt?: string;
   disableAuth: boolean;
   developmentMode: boolean;
   allowedRoots: string[];
@@ -15,6 +20,10 @@ export interface Config {
   maxCommandOutputBytes: number;
   commandTimeoutMs: number;
   codexTimeoutMs: number;
+  requireApprovalForCodexVisible: boolean;
+  requireApprovalForCodexHidden: boolean;
+  requireApprovalForWriteFile: boolean;
+  requireApprovalForNormalCommands: boolean;
 }
 
 export const AUTONOMY_LEVELS: AutonomyLevel[] = ["manual", "workspace", "build-test", "full-project"];

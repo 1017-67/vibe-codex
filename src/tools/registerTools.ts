@@ -4,6 +4,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Config, AutonomyLevel, AUTONOMY_LEVELS } from "../config/types.js";
 import { canRunCodex, canWriteFiles } from "../safety/approvals.js";
+import { ApprovalStore, ActionRisk, approvalRequired, requiresApproval } from "../approvals/actionPolicy.js";
 import { checkCodexAvailable, getCodexVersion } from "../codex/codexCli.js";
 import { createWorkspace as createWorkspaceImpl, WorkspaceTemplate } from "../workspace/createWorkspace.js";
 import { listFiles, readFile, writeFile } from "../workspace/files.js";
@@ -15,6 +16,7 @@ import { collectVisibleRunResult, continueCodexTask, ExecutionMode, startAppSupe
 import { RunStore } from "../runs/runStore.js";
 import { VibeError, toErrorPayload } from "../util/errors.js";
 import { assertSafeWorkspacePath } from "../safety/paths.js";
+import { classifyCommand } from "../safety/commandRisk.js";
 
 const Autonomy = z.enum(AUTONOMY_LEVELS as [AutonomyLevel, ...AutonomyLevel[]]);
 const Template = z.enum(["empty", "node", "python", "vite", "next", "chrome-extension"]);
@@ -59,6 +61,14 @@ async function discoverProjects(config: Config) {
 }
 
 export function registerTools(server: McpServer, config: Config, runStore: RunStore) {
+  const approvalStore = new ApprovalStore();
+
+  function maybeApproval(actionRisk: ActionRisk, reason: string, actionSummary: Record<string, unknown>) {
+    if (!requiresApproval(config, actionRisk)) return null;
+    if (approvalStore.consumeApproved(actionRisk, actionSummary)) return null;
+    return approvalRequired(approvalStore.create({ reason, actionRisk, actionSummary }));
+  }
+
   server.registerTool("relay_health", {
     description: "Check Vibe Codex relay health and Codex CLI availability.",
     inputSchema: z.object({}).optional(),
@@ -66,7 +76,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     const codexVersion = await getCodexVersion(config);
     return {
       status: codexVersion ? "ok" : "degraded",
-      version: "0.1.0",
+      version: "0.2.0",
       codexAvailable: !!codexVersion,
       codexVersion: codexVersion ?? undefined,
       allowedRoots: config.allowedRoots,
@@ -122,18 +132,40 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
   }, async (args) => safeTool(async () => readFile(args.workspacePath, args.relativePath, config, args.maxBytes ?? 200_000)));
 
   server.registerTool("write_file", {
-    description: "Write a file inside a workspace when autonomy allows writes.",
+    description: "Write a file inside a workspace when autonomy allows writes. Do not use direct write_file as fallback for a failed Codex task unless the user explicitly authorizes fallback.",
     inputSchema: z.object({ workspacePath: z.string(), relativePath: z.string(), content: z.string(), overwrite: z.boolean().optional(), autonomy: Autonomy.optional() }),
   }, async (args) => safeTool(async () => {
     const autonomy = args.autonomy ?? "workspace";
     if (!canWriteFiles(autonomy)) throw new VibeError("APPROVAL_REQUIRED", "Manual autonomy cannot write files.", { autonomy });
-    return writeFile(args.workspacePath, args.relativePath, args.content, args.overwrite ?? false, config);
+    const approval = maybeApproval("write", "Direct file writes require local approval.", {
+      tool: "write_file",
+      workspacePath: args.workspacePath,
+      relativePath: args.relativePath,
+      overwrite: args.overwrite ?? false,
+      autonomy,
+    });
+    if (approval) return approval;
+    const result = await writeFile(args.workspacePath, args.relativePath, args.content, args.overwrite ?? false, config);
+    return { ...result, directWrite: true, doNotUseAsCodexFallbackWithoutUserApproval: true };
   }));
 
   server.registerTool("run_workspace_command", {
     description: "Run a risk-classified command inside a workspace.",
     inputSchema: z.object({ workspacePath: z.string(), command: z.string(), autonomy: Autonomy.optional(), timeoutMs: z.number().int().positive().optional() }),
-  }, async (args) => safeTool(async () => runWorkspaceCommand({ workspacePath: args.workspacePath, command: args.command, autonomy: args.autonomy ?? "workspace", timeoutMs: args.timeoutMs, config })));
+  }, async (args) => safeTool(async () => {
+    const autonomy = args.autonomy ?? "workspace";
+    const classified = classifyCommand(args.command);
+    if (classified.risk === "normal") {
+      const approval = maybeApproval("execute", "Normal workspace commands require local approval.", {
+        tool: "run_workspace_command",
+        workspacePath: args.workspacePath,
+        command: args.command,
+        autonomy,
+      });
+      if (approval) return approval;
+    }
+    return runWorkspaceCommand({ workspacePath: args.workspacePath, command: args.command, autonomy, timeoutMs: args.timeoutMs, config });
+  }));
 
   server.registerTool("open_in_codex_app", {
     description: "Open a workspace in the Codex desktop app for visual supervision.",
@@ -144,7 +176,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
   }));
 
   server.registerTool("start_codex_task", {
-    description: "Compile a precise prompt and start a Codex task in hidden, terminal-visible, or app-supervised mode.",
+    description: "Compile a precise prompt and start a Codex task. Hidden Codex requires explicit approval; direct write_file must not be used as fallback after a failed Codex task unless the user explicitly authorizes fallback.",
     inputSchema: z.object({
       workspacePath: z.string(),
       userGoal: z.string(),
@@ -156,6 +188,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       autonomy: Autonomy.optional(),
       openApp: z.boolean().optional(),
       executionMode: ExecutionModeSchema.optional(),
+      allowHiddenCodex: z.boolean().optional(),
     }),
   }, async (args) => safeTool(async () => {
     const autonomy = args.autonomy ?? "workspace";
@@ -166,6 +199,14 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     const prompt = compileCodexPrompt({ workspacePath, userGoal: args.userGoal, context: args.context, constraints: args.constraints, nonGoals: args.nonGoals, acceptanceCriteria: args.acceptanceCriteria, verification: args.verification, autonomy });
 
     if (executionMode === "terminal-visible") {
+      const approval = maybeApproval("codex-visible", "Visible Codex execution requires local approval.", {
+        tool: "start_codex_task",
+        executionMode,
+        workspacePath,
+        userGoal: args.userGoal,
+        autonomy,
+      });
+      if (approval) return approval;
       const run = await startTerminalVisibleCodexTask({ workspacePath, prompt, autonomy, config, runStore });
       return {
         runId: run.id,
@@ -175,11 +216,21 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
         promptPath: run.metadata?.promptPath,
         logPath: run.metadata?.logPath,
         scriptPath: run.metadata?.scriptPath,
+        requiresVisibleSupervision: true,
+        doNotFallbackToDirectWrite: true,
         message: "Codex is running visibly in a macOS Terminal window. Use collect_visible_run_result to read the log and diff later.",
       };
     }
 
     if (executionMode === "app-supervised") {
+      const approval = maybeApproval("codex-visible", "App-supervised Codex execution requires local approval.", {
+        tool: "start_codex_task",
+        executionMode,
+        workspacePath,
+        userGoal: args.userGoal,
+        autonomy,
+      });
+      if (approval) return approval;
       const run = await startAppSupervisedCodexTask({ workspacePath, prompt, autonomy, config, runStore, openApp: true, copyClipboard: true });
       return {
         runId: run.id,
@@ -189,10 +240,35 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
         promptPath: run.metadata?.promptPath,
         appOpened: run.metadata?.appOpened,
         clipboardCopied: run.metadata?.clipboardCopied,
+        requiresVisibleSupervision: true,
+        doNotFallbackToDirectWrite: true,
         message: "Codex app has been opened. The prompt was copied to the clipboard if pbcopy was available; paste it into Codex app to run visibly.",
       };
     }
 
+    const hiddenApprovalSummary = {
+      tool: "start_codex_task",
+      executionMode,
+      workspacePath,
+      userGoal: args.userGoal,
+      autonomy,
+      allowHiddenCodex: args.allowHiddenCodex === true,
+    };
+    let hiddenApprovedByOneTimeApproval = false;
+    if (!args.allowHiddenCodex) {
+      if (approvalStore.consumeApproved("codex-hidden", hiddenApprovalSummary)) {
+        hiddenApprovedByOneTimeApproval = true;
+      } else {
+      const approval = approvalRequired(approvalStore.create({
+        reason: "Hidden Codex execution requires explicit allowHiddenCodex=true or one-time local approval.",
+        actionRisk: "codex-hidden",
+        actionSummary: hiddenApprovalSummary,
+      }));
+      return { ...approval, doNotFallbackToDirectWrite: true };
+      }
+    }
+    const approval = hiddenApprovedByOneTimeApproval ? null : maybeApproval("codex-hidden", "Hidden Codex execution requires local approval.", hiddenApprovalSummary);
+    if (approval) return { ...approval, doNotFallbackToDirectWrite: true };
     if (args.openApp) await openCodexApp(workspacePath, config);
     const run = await startCodexExecTask({ workspacePath, prompt, autonomy, config, runStore });
     const status = await gitStatus(workspacePath, config).catch(() => undefined);
@@ -207,6 +283,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       exitCode: run.exitCode,
       gitStatus: status?.stdout,
       gitDiffSummary: diff?.stdout,
+      doNotFallbackToDirectWrite: true,
     };
   }));
 
@@ -216,11 +293,23 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
   }, async (args) => safeTool(async () => collectVisibleRunResult({ runId: args.runId, config, runStore, maxBytes: args.maxBytes })));
 
   server.registerTool("continue_codex_task", {
-    description: "Approximate continuation by running another codex exec with saved run context.",
-    inputSchema: z.object({ runId: z.string(), instruction: z.string(), autonomy: Autonomy.optional() }),
+    description: "Approximate continuation by running another hidden codex exec with saved run context. Hidden Codex requires explicit approval; do not use direct write_file as fallback unless the user explicitly authorizes fallback.",
+    inputSchema: z.object({ runId: z.string(), instruction: z.string(), autonomy: Autonomy.optional(), allowHiddenCodex: z.boolean().optional() }),
   }, async (args) => safeTool(async () => {
     const autonomy = args.autonomy ?? "workspace";
     if (!canRunCodex(autonomy)) throw new VibeError("APPROVAL_REQUIRED", "Manual autonomy cannot continue Codex tasks.", { autonomy });
+    const prior = runStore.getRun(args.runId);
+    const summary = { tool: "continue_codex_task", runId: args.runId, workspacePath: prior?.workspacePath, autonomy, allowHiddenCodex: args.allowHiddenCodex === true };
+    let hiddenApprovedByOneTimeApproval = false;
+    if (!args.allowHiddenCodex) {
+      if (approvalStore.consumeApproved("codex-hidden", summary)) {
+        hiddenApprovedByOneTimeApproval = true;
+      } else {
+      return { ...approvalRequired(approvalStore.create({ reason: "Hidden Codex continuation requires explicit allowHiddenCodex=true or one-time local approval.", actionRisk: "codex-hidden", actionSummary: summary })), doNotFallbackToDirectWrite: true };
+      }
+    }
+    const approval = hiddenApprovedByOneTimeApproval ? null : maybeApproval("codex-hidden", "Hidden Codex continuation requires local approval.", summary);
+    if (approval) return { ...approval, doNotFallbackToDirectWrite: true };
     const run = await continueCodexTask({ runId: args.runId, instruction: args.instruction, autonomy, config, runStore });
     const status = await gitStatus(run.workspacePath, config).catch(() => undefined);
     const diff = await gitDiff(run.workspacePath, config, 80_000).catch(() => undefined);
@@ -233,7 +322,26 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       exitCode: run.exitCode,
       gitStatus: status?.stdout,
       gitDiffSummary: diff?.stdout,
+      doNotFallbackToDirectWrite: true,
     };
+  }));
+
+  server.registerTool("approve_action", {
+    description: "Approve a pending Vibe Codex local action gate. Approval is one-time and consumed by the next matching tool call.",
+    inputSchema: z.object({ approvalId: z.string() }),
+  }, async (args) => safeTool(async () => {
+    const approval = approvalStore.approve(args.approvalId);
+    if (!approval) throw new VibeError("CONFIG_ERROR", "Approval not found.", { approvalId: args.approvalId });
+    return { approval };
+  }));
+
+  server.registerTool("reject_action", {
+    description: "Reject a pending Vibe Codex local action gate.",
+    inputSchema: z.object({ approvalId: z.string(), reason: z.string().optional() }),
+  }, async (args) => safeTool(async () => {
+    const approval = approvalStore.reject(args.approvalId, args.reason);
+    if (!approval) throw new VibeError("CONFIG_ERROR", "Approval not found.", { approvalId: args.approvalId });
+    return { approval };
   }));
 
   server.registerTool("get_run", {

@@ -64,7 +64,7 @@ export function classifyCommand(command: string): CommandRiskResult {
     return { risk: "dangerous", reason: "Recursive permission or ownership changes require approval." };
   }
   if (/^(curl|wget)(\s|$)/i.test(cmd)) {
-    return { risk: "dangerous", reason: "Network fetch commands require approval in v0.1." };
+    return { risk: "dangerous", reason: "Network fetch commands require approval in v0.2." };
   }
   if (/^brew install(\s|$)/i.test(cmd)) {
     return { risk: "dangerous", reason: "System package installation requires approval." };
@@ -95,5 +95,5 @@ export function classifyCommand(command: string): CommandRiskResult {
     return { risk: "normal", reason: "Command is project-scoped but not on the strict safe allowlist." };
   }
 
-  return { risk: "dangerous", reason: "Command is not recognized by the v0.1 allowlist." };
+  return { risk: "dangerous", reason: "Command is not recognized by the v0.2 allowlist." };
 }

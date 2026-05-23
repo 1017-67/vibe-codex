@@ -8,6 +8,11 @@ export async function tempConfig(): Promise<{ config: Config; root: string; clea
   const config: Config = {
     port: 8787,
     relayToken: "test",
+    allowUrlTokenAuth: false,
+    urlToken: undefined,
+    urlTokenRequiredPrefix: "vibe_",
+    urlTokenMinLength: 32,
+    urlTokenExpiresAt: undefined,
     disableAuth: true,
     developmentMode: true,
     allowedRoots: [root],
@@ -20,6 +25,10 @@ export async function tempConfig(): Promise<{ config: Config; root: string; clea
     maxCommandOutputBytes: 200_000,
     commandTimeoutMs: 120_000,
     codexTimeoutMs: 900_000,
+    requireApprovalForCodexVisible: false,
+    requireApprovalForCodexHidden: true,
+    requireApprovalForWriteFile: false,
+    requireApprovalForNormalCommands: false,
   };
   return { config, root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }

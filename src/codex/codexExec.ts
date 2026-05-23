@@ -118,11 +118,14 @@ export async function createTerminalVisibleRunArtifacts(args: {
   prompt: string;
   config: Config;
   capabilities: CodexExecCapabilities;
+  baselineStatus?: string;
 }) {
   const runDir = await ensureRunDir(args.workspacePath, args.runId);
   const promptPath = await writePrompt(runDir, args.prompt);
   const logPath = path.join(runDir, "codex.log");
   const scriptPath = path.join(runDir, "run-codex.sh");
+  const baselineStatusPath = path.join(runDir, "baseline-status.txt");
+  await fs.writeFile(baselineStatusPath, args.baselineStatus ?? "", "utf8");
   const codexCommand = codexScriptCommand(args.config, args.capabilities, promptPath);
   const script = `#!/usr/bin/env bash
 set -euo pipefail
@@ -130,14 +133,19 @@ cd ${shellQuote(args.workspacePath)}
 echo "Vibe Codex visible run: ${args.runId}"
 echo "Prompt: ${path.relative(args.workspacePath, promptPath)}"
 echo "Starting Codex..."
+set +e
 ${codexCommand} 2>&1 | tee ${shellQuote(logPath)}
+VIBE_CODEX_EXIT_CODE=\${PIPESTATUS[0]}
+set -e
+echo "__VIBE_CODEX_RUN_EXIT_CODE=\${VIBE_CODEX_EXIT_CODE}" | tee -a ${shellQuote(logPath)}
+echo "__VIBE_CODEX_RUN_FINISHED__" | tee -a ${shellQuote(logPath)}
 echo "Codex finished."
 echo "Press Enter to close."
 read
 `;
   await fs.writeFile(scriptPath, script, { encoding: "utf8", mode: 0o700 });
   await fs.chmod(scriptPath, 0o700);
-  return { runDir, promptPath, logPath, scriptPath, script };
+  return { runDir, promptPath, logPath, scriptPath, baselineStatusPath, script };
 }
 
 async function createPromptOnlyRunArtifacts(workspacePath: string, runId: string, prompt: string) {
@@ -156,6 +164,7 @@ export async function startTerminalVisibleCodexTask(args: {
 }): Promise<RunRecord> {
   const cwd = await assertSafeWorkspacePath(args.workspacePath, args.config);
   const capabilities = await inspectCodexExecCapabilities(args.config);
+  const baselineStatus = (await gitStatus(cwd, args.config).catch(() => undefined))?.stdout ?? "";
   const placeholder = args.runStore.createRun({
     workspacePath: cwd,
     status: "running_visible",
@@ -164,7 +173,7 @@ export async function startTerminalVisibleCodexTask(args: {
     command: "pending visible terminal launch",
     metadata: { executionMode: "terminal-visible" },
   });
-  const artifacts = await createTerminalVisibleRunArtifacts({ workspacePath: cwd, runId: placeholder.id, prompt: args.prompt, config: args.config, capabilities });
+  const artifacts = await createTerminalVisibleRunArtifacts({ workspacePath: cwd, runId: placeholder.id, prompt: args.prompt, config: args.config, capabilities, baselineStatus });
   const openResult = args.launch === false
     ? undefined
     : await runProcessArgv({ file: "open", args: ["-a", "Terminal", artifacts.scriptPath], cwd, timeoutMs: 30_000, maxOutputBytes: args.config.maxCommandOutputBytes });
@@ -179,6 +188,7 @@ export async function startTerminalVisibleCodexTask(args: {
       promptPath: artifacts.promptPath,
       logPath: artifacts.logPath,
       scriptPath: artifacts.scriptPath,
+      baselineStatusPath: artifacts.baselineStatusPath,
       launchExitCode: openResult?.exitCode,
     },
   });
@@ -232,6 +242,7 @@ export async function collectVisibleRunResult(args: {
   const run = args.runStore.getRun(args.runId);
   if (!run) throw new VibeError("CONFIG_ERROR", "Run not found.", { runId: args.runId });
   const logPath = typeof run.metadata?.logPath === "string" ? run.metadata.logPath : undefined;
+  const baselineStatusPath = typeof run.metadata?.baselineStatusPath === "string" ? run.metadata.baselineStatusPath : undefined;
   let log = "";
   let truncated = false;
   if (logPath) {
@@ -254,21 +265,41 @@ export async function collectVisibleRunResult(args: {
   }
   const status = await gitStatus(run.workspacePath, args.config).catch(() => undefined);
   const diff = await gitDiff(run.workspacePath, args.config, args.maxBytes ?? 80_000).catch(() => undefined);
-  const changedFiles = (status?.stdout ?? "")
+  const statusText = status?.stdout ?? "";
+  const baselineStatus = baselineStatusPath ? await fs.readFile(baselineStatusPath, "utf8").catch(() => "") : "";
+  const changedFiles = statusText
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => line.slice(3).trim());
+    .map((line) => line.slice(3).trim())
+    .filter((file) => !file.startsWith(".vibe-codex/"));
+  const baselineFiles = new Set(baselineStatus
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.slice(3).trim())
+    .filter((file) => !file.startsWith(".vibe-codex/")));
+  const newChangedFilesSinceRun = changedFiles.filter((file) => !baselineFiles.has(file));
+  const completedMarkers = ["__VIBE_CODEX_RUN_FINISHED__", "Summary of changes:", "tokens used", "Codex finished."];
+  const failureMarkers = ["Not inside a trusted directory", "error:", "fatal:"];
+  const completedVisible = completedMarkers.some((marker) => log.includes(marker));
+  const failedVisible = !completedVisible && failureMarkers.some((marker) => log.toLowerCase().includes(marker.toLowerCase()));
+  const collectedStatus = completedVisible ? "completed_visible" : failedVisible ? "failed_visible" : run.status;
+  if (collectedStatus !== run.status && (collectedStatus === "completed_visible" || collectedStatus === "failed_visible")) {
+    args.runStore.updateRun(run.id, { status: collectedStatus });
+  }
   return {
     runId: run.id,
-    status: run.status,
+    status: collectedStatus,
     log,
     truncated,
     logPath,
     promptPath: run.metadata?.promptPath,
-    gitStatus: status?.stdout ?? "",
+    baselineStatus,
+    gitStatus: statusText,
     gitDiffSummary: diff?.stdout ?? "",
     changedFiles,
+    newChangedFilesSinceRun,
   };
 }
 
