@@ -101,6 +101,24 @@ describe("MCP Streamable HTTP sessions", () => {
     expect(payload.error.message).toBe("Invalid or missing MCP session id");
   });
 
+  it("rate limits repeated MCP initialize requests", async () => {
+    let response: Response | undefined;
+    for (let i = 0; i < 61; i += 1) {
+      response = await postMcp({
+        jsonrpc: "2.0",
+        id: 1000 + i,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "rate-limit", version: "0.0.0" },
+        },
+      });
+      await response.text();
+    }
+    expect(response?.status).toBe(429);
+  });
+
   it("relay_health can be called through MCP", async () => {
     const init = await initialize();
     await (await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId!)).text();

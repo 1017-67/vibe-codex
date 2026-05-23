@@ -72,6 +72,8 @@ describe("Codex exec integration", () => {
     expect(script).toContain("tee");
     expect(script).toContain("__VIBE_CODEX_RUN_EXIT_CODE=");
     expect(script).toContain("__VIBE_CODEX_RUN_FINISHED__");
+    expect(script).toContain("printf '%s\\n'");
+    expect(script).not.toContain("echo \"Prompt:");
     expect(script).not.toContain("--approval");
   });
 

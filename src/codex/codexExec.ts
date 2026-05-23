@@ -139,20 +139,21 @@ export async function createTerminalVisibleRunArtifacts(args: {
     createdAt: new Date().toISOString(),
   }, null, 2), "utf8");
   const codexCommand = codexScriptCommand(args.config, args.capabilities, promptPath);
+  const promptRelativePath = path.relative(args.workspacePath, promptPath);
   const script = `#!/usr/bin/env bash
 set -euo pipefail
 cd ${shellQuote(args.workspacePath)}
-echo "Vibe Codex visible run: ${args.runId}"
-echo "Prompt: ${path.relative(args.workspacePath, promptPath)}"
-echo "Starting Codex..."
+printf '%s\\n' ${shellQuote(`Vibe Codex visible run: ${args.runId}`)}
+printf '%s\\n' ${shellQuote(`Prompt: ${promptRelativePath}`)}
+printf '%s\\n' 'Starting Codex...'
 set +e
 ${codexCommand} 2>&1 | tee ${shellQuote(logPath)}
 VIBE_CODEX_EXIT_CODE=\${PIPESTATUS[0]}
 set -e
-echo "__VIBE_CODEX_RUN_EXIT_CODE=\${VIBE_CODEX_EXIT_CODE}" | tee -a ${shellQuote(logPath)}
-echo "__VIBE_CODEX_RUN_FINISHED__" | tee -a ${shellQuote(logPath)}
-echo "Codex finished."
-echo "Press Enter to close."
+printf '%s\\n' "__VIBE_CODEX_RUN_EXIT_CODE=\${VIBE_CODEX_EXIT_CODE}" | tee -a ${shellQuote(logPath)}
+printf '%s\\n' '__VIBE_CODEX_RUN_FINISHED__' | tee -a ${shellQuote(logPath)}
+printf '%s\\n' 'Codex finished.'
+printf '%s\\n' 'Press Enter to close.'
 read
 `;
   await fs.writeFile(scriptPath, script, { encoding: "utf8", mode: 0o700 });

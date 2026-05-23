@@ -33,6 +33,21 @@ export function classifyCommand(command: string): CommandRiskResult {
   if (/pbpaste\s*\|\s*(curl|wget)\b/i.test(cmd)) {
     return { risk: "blocked", reason: "Exfiltrating clipboard contents is blocked." };
   }
+  if (/[`]/.test(cmd) || /\$\(/.test(cmd)) {
+    return { risk: "blocked", reason: "Shell command substitution is blocked." };
+  }
+  if (/(^|\s)(eval|exec)(\s|$)/i.test(cmd)) {
+    return { risk: "blocked", reason: "Shell eval/exec is blocked." };
+  }
+  if (/^(node|python|python3|perl|ruby|bash|sh|zsh)\s+-(e|c)(\s|$)/i.test(cmd)) {
+    return { risk: "blocked", reason: "Inline interpreter execution is blocked." };
+  }
+  if (/\|\s*(node|python|python3|perl|ruby|bash|sh|zsh)\b/i.test(cmd)) {
+    return { risk: "blocked", reason: "Piping into interpreters is blocked." };
+  }
+  if (/(\bnc\b|\bncat\b|\bnetcat\b|\/dev\/tcp\/|\/dev\/udp\/|bash\s+-i|sh\s+-i|0<&|1>&|2>&)/i.test(cmd)) {
+    return { risk: "blocked", reason: "Network shell or reverse-shell style command is blocked." };
+  }
   if (/^rm\s+-[^\s]*r[^\s]*f?[^\s]*(\s+|$)(\/|~|\$HOME)(\s|$)/i.test(cmd) || /^rm\s+-[^\s]*f?[^\s]*r[^\s]*(\s+|$)(\/|~|\$HOME)(\s|$)/i.test(cmd)) {
     return { risk: "blocked", reason: "Destructive remove against system or home path is blocked." };
   }
@@ -89,10 +104,6 @@ export function classifyCommand(command: string): CommandRiskResult {
   ];
   if (normalPatterns.some((pattern) => pattern.test(cmd))) {
     return { risk: "normal", reason: "Command is a normal project setup/build command." };
-  }
-
-  if (/\b(npm|pnpm|yarn|pip|python|python3|node|git|make|cmake)\b/.test(lower)) {
-    return { risk: "normal", reason: "Command is project-scoped but not on the strict safe allowlist." };
   }
 
   return { risk: "dangerous", reason: "Command is not recognized by the v0.2 allowlist." };

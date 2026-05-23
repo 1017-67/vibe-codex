@@ -2,6 +2,14 @@
 
 These checks verify the local MCP relay, ChatGPT connector route, visible Codex run path, and security gates.
 
+Security hardening checks:
+
+- OAuth `/authorize` rejects unknown `client_id` values.
+- OAuth `/register` is only available when `ENABLE_EXPERIMENTAL_OAUTH=true` and is rate-limited.
+- MCP initialize floods eventually return `429`.
+- `run_workspace_command` blocks `sudo`, secret reads, inline interpreters such as `node -e` / `python -c`, shell substitutions, and pipes into interpreters.
+- Visible terminal scripts quote generated paths/messages and write `__VIBE_CODEX_RUN_FINISHED__`.
+
 ## Local Build
 
 ```bash
@@ -62,6 +70,7 @@ Call `relay_health`, then `connector_setup_status`.
 ## Security Negative Tests
 
 - `run_workspace_command` with `sudo ls` returns blocked.
+- `run_workspace_command` with `node -e "console.log(1)"` returns blocked.
 - `run_workspace_command` with `git reset --hard` does not execute.
 - `read_file` for `.env`, `.pem`, `.key`, `~/.ssh`, or `~/.codex` fails.
 - `start_codex_task` with `executionMode: "exec-hidden"` requires `allowHiddenCodex: true` or approval.

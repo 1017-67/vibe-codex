@@ -40,7 +40,7 @@ Edit `.env` before exposing the server:
 
 ```env
 PORT=8787
-RELAY_TOKEN=change-me
+RELAY_TOKEN=
 ALLOW_URL_TOKEN_AUTH=false
 URL_TOKEN=
 URL_TOKEN_REQUIRED_PREFIX=vibe_
@@ -48,6 +48,9 @@ URL_TOKEN_MIN_LENGTH=32
 URL_TOKEN_EXPIRES_AT=
 ALLOWED_ROOTS=~/projects,~/67
 DEFAULT_PARENT_DIR=/Users/root/
+ALLOWED_ROOTS=~/Projects,~/codex-work
+DEFAULT_PARENT_DIR=~/codex-work
+>>>>>>> be65c86 (Harden OAuth and command safety for Vibe Codex)
 CODEX_BIN=codex
 DATABASE_PATH=./vibe-codex.sqlite
 DEFAULT_CODEX_APPROVAL=untrusted
@@ -68,7 +71,7 @@ OAUTH_ALLOWED_REDIRECT_HOSTS=chat.openai.com,chatgpt.com
 OAUTH_REQUIRE_LOCAL_APPROVAL=true
 ```
 
-`RELAY_TOKEN` is required unless you explicitly run in development mode. `ALLOWED_ROOTS` defines the only directories Vibe Codex can touch. `DEFAULT_PARENT_DIR` is where new workspaces are created by default.
+`RELAY_TOKEN` is required unless you explicitly run in development mode. `ALLOWED_ROOTS` defines the only directories Vibe Codex can touch. `DEFAULT_PARENT_DIR` is where new workspaces are created by default. Use your own local paths; `~` is expanded to your home directory.
 
 For ChatGPT Developer Mode testing where the app UI only offers OAuth, No auth, or Mixed auth, Vibe Codex supports a dev-only URL token:
 
@@ -158,7 +161,18 @@ Authentication: OAuth
 MCP URL: https://<ngrok-url>/mcp
 ```
 
-Vibe Codex exposes OAuth metadata, `/authorize`, `/token`, and `/register`. The flow is local-owner approval with PKCE S256 and opaque in-memory access tokens. URL-token auth remains the simpler development fallback.
+Vibe Codex exposes OAuth metadata, `/authorize`, `/token`, `/revoke`, and `/register`. The flow is local-owner approval with PKCE S256 and opaque in-memory access tokens. URL-token auth remains the simpler development fallback.
+
+OAuth hardening in v0.2:
+
+- `/authorize` only accepts dynamically registered clients.
+- `/register`, `/authorize`, `/token`, `/revoke`, and MCP initialize are rate-limited in memory.
+- OAuth scopes are limited to `mcp`.
+- Empty provided OAuth `state` values are rejected.
+- Authorization codes are one-time use and are deleted after successful exchange.
+- Access tokens can be revoked at `/revoke`.
+
+Dynamic client registration remains unauthenticated when experimental OAuth is enabled because ChatGPT OAuth compatibility depends on public client registration. Keep OAuth behind localhost or a tunnel URL you control.
 
 ## Tools
 
@@ -218,6 +232,8 @@ When an action needs approval, the tool returns:
 Call `approve_action` with that `approvalId`, then retry the original tool call. Approval is one-time and consumed by the next matching action. `reject_action` records a rejection.
 
 Direct `write_file` is flagged as `directWrite`. ChatGPT should not use direct file writes as fallback after a failed Codex task unless the user explicitly authorizes fallback.
+
+`run_workspace_command` uses a strict command allowlist. Inline interpreter execution (`node -e`, `python -c`, `bash -c`), shell substitutions, pipes into interpreters, `sudo`, secret reads, and reverse-shell style commands are blocked. Unknown commands are treated as dangerous and are not executed.
 
 ## Example Workflow
 

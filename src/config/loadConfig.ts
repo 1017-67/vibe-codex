@@ -1,4 +1,6 @@
 import path from "node:path";
+import os from "node:os";
+import { randomBytes } from "node:crypto";
 import dotenv from "dotenv";
 import { Config } from "./types.js";
 import { VibeError } from "../util/errors.js";
@@ -17,7 +19,13 @@ function int(value: string | undefined, fallback: number): number {
 
 function splitPaths(value: string | undefined, fallback: string[]): string[] {
   const parts = (value ?? "").split(",").map((part) => part.trim()).filter(Boolean);
-  return (parts.length ? parts : fallback).map((part) => path.resolve(part));
+  return (parts.length ? parts : fallback).map((part) => path.resolve(expandHome(part)));
+}
+
+function expandHome(value: string): string {
+  if (value === "~") return os.homedir();
+  if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
+  return value;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -53,11 +61,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
 
   const allowedRoots = splitPaths(env.ALLOWED_ROOTS, [path.resolve(process.cwd())]);
-  const defaultParentDir = path.resolve(env.DEFAULT_PARENT_DIR ?? allowedRoots[0] ?? process.cwd());
+  const defaultParentDir = path.resolve(expandHome(env.DEFAULT_PARENT_DIR ?? allowedRoots[0] ?? process.cwd()));
 
   return {
     port: int(env.PORT, 8787),
-    relayToken: relayToken ?? (developmentMode ? "dev-token" : undefined),
+    relayToken: relayToken ?? (developmentMode ? `vibe_dev_${randomBytes(24).toString("hex")}` : undefined),
     allowUrlTokenAuth,
     urlToken,
     urlTokenRequiredPrefix,

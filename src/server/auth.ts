@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from "express";
 import { Config } from "../config/types.js";
 import { AuthMethod } from "./authSessions.js";
 import { OAuthStore } from "./oauthStore.js";
+import { constantTimeEqual } from "../util/crypto.js";
 
 function queryStringValue(value: unknown): string | undefined {
   if (typeof value === "string") return value;
@@ -16,7 +17,7 @@ function requestUrlToken(req: Request): string | undefined {
 function hasValidUrlToken(req: Request, config: Config): boolean {
   if (!config.allowUrlTokenAuth || !config.urlToken) return false;
   if (config.urlTokenExpiresAt && Date.now() > Date.parse(config.urlTokenExpiresAt)) return false;
-  return requestUrlToken(req) === config.urlToken;
+  return constantTimeEqual(requestUrlToken(req), config.urlToken);
 }
 
 export function getAuthMethod(req: Request): AuthMethod | undefined {
@@ -59,8 +60,7 @@ export function bearerAuth(config: Config, oauthStore?: OAuthStore) {
       (req as Request & { vibeOAuthToken?: string }).vibeOAuthToken = token;
       return next();
     }
-    const expected = `Bearer ${config.relayToken}`;
-    if (header !== expected) return res.status(403).json({ error: { code: "AUTH_INVALID", message: "Authorization bearer token is invalid.", details: {} } });
+    if (!constantTimeEqual(token, config.relayToken)) return res.status(403).json({ error: { code: "AUTH_INVALID", message: "Authorization bearer token is invalid.", details: {} } });
     setAuthMethod(req, "bearer");
     return next();
   };

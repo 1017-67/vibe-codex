@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Config } from "../config/types.js";
+import { constantTimeEqual } from "../util/crypto.js";
 
 export interface OAuthClientRecord {
   clientId: string;
@@ -47,7 +48,7 @@ export class OAuthStore {
   }
 
   validateClient(clientId: string): boolean {
-    return typeof clientId === "string" && clientId.length > 0 && clientId.length <= 512;
+    return typeof clientId === "string" && this.clients.has(clientId);
   }
 
   getClient(clientId: string): OAuthClientRecord | undefined {
@@ -55,6 +56,7 @@ export class OAuthStore {
   }
 
   createCode(args: { clientId: string; redirectUri: string; codeChallenge: string; scope?: string; resource?: string; config: Config }): OAuthAuthCodeRecord {
+    this.cleanupExpired();
     const now = Date.now();
     const record: OAuthAuthCodeRecord = {
       code: randomBytes(32).toString("base64url"),
@@ -71,17 +73,20 @@ export class OAuthStore {
   }
 
   consumeCode(args: { code: string; clientId: string; redirectUri: string; codeVerifier: string }): { ok: true; code: OAuthAuthCodeRecord } | { ok: false; error: string } {
+    this.cleanupExpired();
     const record = this.codes.get(args.code);
     if (!record) return { ok: false, error: "invalid_grant" };
     if (record.usedAt) return { ok: false, error: "invalid_grant" };
     if (Date.now() > Date.parse(record.expiresAt)) return { ok: false, error: "invalid_grant" };
-    if (record.clientId !== args.clientId || record.redirectUri !== args.redirectUri) return { ok: false, error: "invalid_grant" };
-    if (pkceS256(args.codeVerifier) !== record.codeChallenge) return { ok: false, error: "invalid_grant" };
+    if (!constantTimeEqual(record.clientId, args.clientId) || record.redirectUri !== args.redirectUri) return { ok: false, error: "invalid_grant" };
+    if (!constantTimeEqual(pkceS256(args.codeVerifier), record.codeChallenge)) return { ok: false, error: "invalid_grant" };
     record.usedAt = new Date().toISOString();
+    this.codes.delete(record.code);
     return { ok: true, code: record };
   }
 
   createAccessToken(args: { clientId: string; scope: string; resource?: string; config: Config }): OAuthAccessTokenRecord {
+    this.cleanupExpired();
     const now = Date.now();
     const record: OAuthAccessTokenRecord = {
       token: `vibe_oauth_${randomBytes(32).toString("base64url")}`,
@@ -96,17 +101,30 @@ export class OAuthStore {
   }
 
   verifyAccessToken(token: string): OAuthAccessTokenRecord | null {
-    const record = this.tokens.get(token);
-    if (!record) return null;
-    if (Date.now() > Date.parse(record.expiresAt)) return null;
-    return record;
+    this.cleanupExpired();
+    for (const record of this.tokens.values()) {
+      if (constantTimeEqual(record.token, token)) return record;
+    }
+    return null;
   }
 
-  secretsForRedaction(): string[] {
-    return [
-      ...this.codes.keys(),
-      ...this.tokens.keys(),
-    ];
+  revokeAccessToken(token: string): boolean {
+    for (const record of this.tokens.values()) {
+      if (constantTimeEqual(record.token, token)) {
+        this.tokens.delete(record.token);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  cleanupExpired(now = Date.now()) {
+    for (const [code, record] of this.codes) {
+      if (record.usedAt || now > Date.parse(record.expiresAt)) this.codes.delete(code);
+    }
+    for (const [token, record] of this.tokens) {
+      if (now > Date.parse(record.expiresAt)) this.tokens.delete(token);
+    }
   }
 }
 
@@ -121,4 +139,9 @@ export function validateRedirectUri(config: Config, redirectUri: string): boolea
   } catch {
     return false;
   }
+}
+
+export function validateOAuthScope(scope: string | undefined): boolean {
+  const values = (scope || "mcp").split(/\s+/).filter(Boolean);
+  return values.length > 0 && values.every((value) => value === "mcp");
 }
