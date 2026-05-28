@@ -1,4 +1,5 @@
 export type AutonomyLevel = "manual" | "workspace" | "build-test" | "full-project";
+export type DefaultVisibleMode = "codex-app-visible" | "ghostty-visible";
 
 export interface Config {
   port: number;
@@ -17,6 +18,7 @@ export interface Config {
   terminalApp: string;
   terminalFallbackApp: string;
   preferGhostty: boolean;
+  defaultVisibleMode: DefaultVisibleMode;
   codexAppServerUrl?: string;
   databasePath: string;
   defaultCodexApproval: string;

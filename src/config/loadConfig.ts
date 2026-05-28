@@ -2,7 +2,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomBytes } from "node:crypto";
 import dotenv from "dotenv";
-import { Config } from "./types.js";
+import { Config, DefaultVisibleMode } from "./types.js";
 import { VibeError } from "../util/errors.js";
 
 dotenv.config();
@@ -26,6 +26,14 @@ function expandHome(value: string): string {
   if (value === "~") return os.homedir();
   if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
   return value;
+}
+
+function defaultVisibleMode(value: string | undefined): DefaultVisibleMode {
+  if (value === "codex-app-visible" || value === "ghostty-visible") return value;
+  if (value) {
+    throw new VibeError("CONFIG_ERROR", "DEFAULT_VISIBLE_MODE must be codex-app-visible or ghostty-visible.", { configured: value });
+  }
+  return "codex-app-visible";
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -80,6 +88,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     terminalApp: env.TERMINAL_APP || "ghostty",
     terminalFallbackApp: env.TERMINAL_FALLBACK_APP || "Terminal",
     preferGhostty: bool(env.PREFER_GHOSTTY, true),
+    defaultVisibleMode: defaultVisibleMode(env.DEFAULT_VISIBLE_MODE),
     codexAppServerUrl: env.CODEX_APP_SERVER_URL || undefined,
     databasePath: path.resolve(env.DATABASE_PATH ?? "./vibe-codex.sqlite"),
     defaultCodexApproval: env.DEFAULT_CODEX_APPROVAL || "untrusted",

@@ -22,6 +22,7 @@ export async function tempConfig(): Promise<{ config: Config; root: string; clea
     terminalApp: "ghostty",
     terminalFallbackApp: "Terminal",
     preferGhostty: true,
+    defaultVisibleMode: "codex-app-visible",
     codexAppServerUrl: undefined,
     databasePath: path.join(root, "test.sqlite"),
     defaultCodexApproval: "on-request",

@@ -52,4 +52,10 @@ describe("auth config hardening", () => {
     expect(config.allowedRoots).toContain(path.join(os.homedir(), "Projects"));
     expect(config.defaultParentDir).toBe(path.join(os.homedir(), "codex-work"));
   });
+
+  it("loads and validates DEFAULT_VISIBLE_MODE", () => {
+    expect(loadConfig({ NODE_ENV: "test" }).defaultVisibleMode).toBe("codex-app-visible");
+    expect(loadConfig({ NODE_ENV: "test", DEFAULT_VISIBLE_MODE: "ghostty-visible" }).defaultVisibleMode).toBe("ghostty-visible");
+    expect(() => loadConfig({ NODE_ENV: "test", DEFAULT_VISIBLE_MODE: "exec-hidden" })).toThrow(/DEFAULT_VISIBLE_MODE/);
+  });
 });

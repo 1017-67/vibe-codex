@@ -52,6 +52,7 @@ CODEX_BIN=codex
 TERMINAL_APP=ghostty
 TERMINAL_FALLBACK_APP=Terminal
 PREFER_GHOSTTY=true
+DEFAULT_VISIBLE_MODE=codex-app-visible
 CODEX_APP_SERVER_URL=
 DATABASE_PATH=./vibe-codex.sqlite
 DEFAULT_CODEX_APPROVAL=untrusted
@@ -181,6 +182,15 @@ Dynamic client registration remains unauthenticated when experimental OAuth is e
 - `connector_setup_status`
 - `get_connector_url`
 - `list_projects`
+- `register_project`
+- `get_project`
+- `resume_project`
+- `set_project_default_thread`
+- `list_project_runs`
+- `list_project_threads`
+- `start_project_task`
+- `continue_project_task`
+- `collect_project_result`
 - `create_workspace`
 - `list_files`
 - `read_file`
@@ -205,15 +215,42 @@ Dynamic client registration remains unauthenticated when experimental OAuth is e
 - `reject_action`
 - `list_pending_approvals`
 
+## Registered Projects
+
+Vibe Codex keeps a persistent project registry in SQLite so ChatGPT can reuse real workspaces instead of creating a one-off folder for every request.
+
+A project record stores:
+
+- `projectId`
+- `name`
+- `workspacePath`
+- optional `repoRemote`
+- `preferredExecutionMode`
+- optional `defaultCodexThreadId`
+- recent Codex thread IDs
+- `createdAt` / `lastUsedAt`
+- optional notes
+
+Use `register_project` for an existing repository or workspace. Registration validates that the path is inside `ALLOWED_ROOTS`; it does not create a new workspace. `start_project_task` and `continue_project_task` operate on a registered project and update `lastUsedAt`. `continue_project_task` uses the project's `defaultCodexThreadId` when available, so repeated requests can continue the same Codex app thread without treating each task as a new project.
+
+`create_workspace` remains available, but Vibe Codex will not create a workspace from `start_project_task` unless a future explicit creation tool path is added. For existing repos, register once, then reuse the project by `projectId`, name, or workspace path.
+
 ## Codex Execution Modes
 
 `start_codex_task` accepts `executionMode`:
 
-- `ghostty-visible` is the preferred default when `PREFER_GHOSTTY=true`. It writes `.vibe-codex/runs/<runId>/prompt.md` and metadata, then opens normal interactive `codex` in Ghostty with the full prompt passed as the initial prompt argument. No `run-codex.sh`, `codex.log`, hidden exec, shell pipe, GUI typing, or `codex exec` is used in this mode.
+- `codex-app-visible` is the GUI-first default when `DEFAULT_VISIBLE_MODE=codex-app-visible`. It opens Codex Desktop with `codex app <workspace>`, writes `.vibe-codex/runs/<runId>/prompt.md` plus `metadata.json`, writes a visible root handoff file at `VIBE_CODEX_PROMPT.md`, copies and verifies the prompt on the clipboard, and returns `app_visible_ready`. Paste/send the clipboard prompt in the GUI manually. If Codex Desktop shows `AGENTS.md`, ignore that display and paste the clipboard contents, or open `VIBE_CODEX_PROMPT.md` / the returned `promptPath`. No `codex exec`, Ghostty, shell script, GUI typing, AppleScript, or accessibility automation is used.
+- `ghostty-visible` is the stable terminal fallback. It writes `.vibe-codex/runs/<runId>/prompt.md` and metadata, then opens normal interactive `codex` in Ghostty with the full prompt passed as the initial prompt argument. No `run-codex.sh`, `codex.log`, hidden exec, shell pipe, GUI typing, or `codex exec` is used in this mode.
 - `terminal-visible` is the legacy supervised script mode. It writes `run-codex.sh` and `codex.log`, then opens macOS Terminal directly.
-- `app-supervised` opens `codex app <workspace>`, writes the prompt file, and copies the prompt to the clipboard with `pbcopy` when available. Paste it into the Codex app manually.
-- `codex-app-thread` is experimental. It uses configured Codex app-server HTTP APIs when `CODEX_APP_SERVER_URL` is set and reachable. If unavailable, tools return a clear error recommending `ghostty-visible`.
+- `app-supervised` is a compatibility alias for the older Codex Desktop prompt handoff behavior.
+- `codex-app-thread` is experimental. It uses configured Codex app-server HTTP APIs when `CODEX_APP_SERVER_URL` is set and reachable. It can start a new app thread, resume an existing thread, continue a mapped thread, fork a thread, list threads, and read thread status. Tool results normalize `runId`, `threadId`, `status`, `workspacePath`, `summary`, and app-server events while preserving the raw app-server response. If unavailable, tools return a clear error recommending `codex-app-visible` or `ghostty-visible`.
 - `exec-hidden` runs `codex exec` synchronously and returns captured stdout/stderr. It is not the default and requires `allowHiddenCodex: true` or a one-time approval.
+
+Project tools use the project `preferredExecutionMode` unless the tool call overrides it:
+
+- `codex-app-thread` is the no-paste Codex Desktop path. It requires `CODEX_APP_SERVER_URL` and sends prompts through app-server thread APIs. It can start, resume, continue, or fork threads and stores the returned Codex thread ID on the project when requested.
+- `codex-app-visible` opens Codex Desktop and writes/copies a handoff prompt. This is a manual GUI fallback; the user still sends the prompt in the app.
+- `ghostty-visible` opens normal interactive Codex in Ghostty and submits the initial prompt automatically. This is the stable visible fallback when app-server is unavailable.
 
 In `ghostty-visible`, Vibe Codex launches normal interactive Codex and submits the prompt as Codex's initial prompt argument. The terminal remains yours: watch Codex messages, continue chatting normally, approve or reject Codex prompts, and press Ctrl+C whenever you want to interrupt.
 
@@ -221,7 +258,7 @@ When Ghostty supports direct command launch, Vibe Codex runs `codex "<prompt>"` 
 
 In legacy `terminal-visible`, the generated script prints the exact prompt, run ID, workspace, prompt path, log path, execution mode, terminal app, and redacted Codex command before Codex starts. The script waits at `Press Enter to start Codex, or Ctrl+C to cancel.` Ctrl+C cancels before start or interrupts Codex after start; output is written live to `codex.log`.
 
-Legacy visible scripts write `**VIBE_CODEX_RUN_STARTED**`, `__VIBE_CODEX_RUN_EXIT_CODE=<code>`, and `**VIBE_CODEX_RUN_FINISHED**` markers. `collect_visible_run_result` treats finished exit code `0` as `completed_visible` even if the log contains non-fatal warning text. For interactive `ghostty-visible`, collection does not expect a log; it compares current `git status --short` against the run baseline and reports `completed_visible` when changed files appeared, or `unknown_interactive` when there is no reliable completion signal yet. Results include `changedFilesSinceRun`, `newChangedFilesSinceRun`, `gitStatus`, `gitDiff`, artifact paths, execution mode, terminal app, and `doNotFallbackToDirectWrite: true`.
+Legacy visible scripts write `**VIBE_CODEX_RUN_STARTED**`, `__VIBE_CODEX_RUN_EXIT_CODE=<code>`, and `**VIBE_CODEX_RUN_FINISHED**` markers. `collect_visible_run_result` treats finished exit code `0` as `completed_visible` even if the log contains non-fatal warning text. For `codex-app-visible` and interactive `ghostty-visible`, collection does not expect a log; it compares current `git status --short` against the run baseline and reports `completed_visible` when changed files appeared, `unknown_app_visible` for app GUI runs with no changes yet, or `unknown_interactive` for Ghostty runs with no changes yet. Results include `changedFilesSinceRun`, `newChangedFilesSinceRun`, `gitStatus`, `gitDiff`, artifact paths, execution mode, terminal app when relevant, and `doNotFallbackToDirectWrite: true`.
 
 Ghostty configuration:
 
@@ -229,6 +266,7 @@ Ghostty configuration:
 TERMINAL_APP=ghostty
 TERMINAL_FALLBACK_APP=Terminal
 PREFER_GHOSTTY=true
+DEFAULT_VISIBLE_MODE=codex-app-visible
 ```
 
 Experimental app-thread configuration:
@@ -237,7 +275,7 @@ Experimental app-thread configuration:
 CODEX_APP_SERVER_URL=http://127.0.0.1:<port>
 ```
 
-Vibe Codex does not GUI-automate Codex Desktop. App-thread tools only call app-server APIs when they are explicitly configured and reachable.
+Vibe Codex does not GUI-automate Codex Desktop. App-thread tools only call app-server APIs when they are explicitly configured and reachable, and the relay never exposes raw app-server access externally.
 
 ## Approval Gates
 
@@ -283,6 +321,20 @@ ChatGPT calls:
 7. continue_codex_task if needed
 ```
 
+Existing project workflow:
+
+```text
+User asks ChatGPT:
+"Use the Vibe Codex project and continue the last Codex thread."
+
+ChatGPT calls:
+1. list_projects
+2. register_project if the workspace is not registered yet
+3. resume_project
+4. start_project_task or continue_project_task
+5. collect_project_result
+```
+
 ## Autonomy Levels
 
 - `manual`: health, listing, safe reads, and prompt compilation only.
@@ -295,10 +347,12 @@ Blocked commands never run. Dangerous commands are not executed. Normal commands
 ## Known Limitations
 
 - Experimental OAuth tokens/codes are in-memory and reset when the relay restarts.
+- Registered projects are persistent in SQLite, but app-server thread availability depends on the local Codex app/app-server runtime.
+- `codex-app-visible` opens Codex Desktop and copies the prompt, but the user must paste/send it manually; completion is inferred from workspace changes.
 - `ghostty-visible` launches normal interactive Codex in Ghostty with the initial prompt already submitted; completion is inferred from workspace changes.
 - `terminal-visible` uses `codex exec` through the legacy visible script.
-- `codex-app-thread` is experimental and requires an external Codex app-server URL; when unavailable, use `ghostty-visible`.
-- Continuation is approximated through saved run context.
+- `codex-app-thread` is experimental and requires a local Codex app-server URL; when unavailable, project tools return a clear fallback recommendation instead of silently switching to manual paste.
+- `continue_project_task` can reuse a saved Codex thread ID with `codex-app-thread`; non-app-thread continuation is still approximated through saved run/workspace context.
 - No live streaming yet.
 - No graphical approval UI yet; approvals are MCP tool calls.
 - Dangerous commands are rejected or approval-required instead of executed.

@@ -26,6 +26,7 @@ export function runProcessArgv(args: {
   timeoutMs?: number;
   maxOutputBytes?: number;
   env?: Record<string, string>;
+  stdin?: string | Buffer;
 }): Promise<ProcessResult> {
   const startedAt = new Date();
   const maxOutputBytes = args.maxOutputBytes ?? 200_000;
@@ -38,8 +39,12 @@ export function runProcessArgv(args: {
     const child = spawn(args.file, args.args ?? [], {
       cwd: args.cwd,
       env: { ...process.env, ...args.env },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [args.stdin == null ? "ignore" : "pipe", "pipe", "pipe"],
     });
+
+    if (args.stdin != null && child.stdin) {
+      child.stdin.end(args.stdin);
+    }
 
     const timer = args.timeoutMs
       ? setTimeout(() => {
@@ -51,10 +56,10 @@ export function runProcessArgv(args: {
         }, args.timeoutMs)
       : undefined;
 
-    child.stdout.on("data", (chunk: Buffer) => {
+    child.stdout?.on("data", (chunk: Buffer) => {
       stdout = appendLimited(stdout, chunk, maxOutputBytes);
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr?.on("data", (chunk: Buffer) => {
       stderr = appendLimited(stderr, chunk, maxOutputBytes);
     });
     child.on("error", (error) => {

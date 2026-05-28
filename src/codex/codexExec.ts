@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 import { Config, AutonomyLevel } from "../config/types.js";
 import { gitDiff, gitStatus } from "../workspace/git.js";
 import { RunStore } from "../runs/runStore.js";
@@ -11,7 +12,7 @@ import { compileCodexPrompt } from "./promptCompiler.js";
 import { logger } from "../util/logger.js";
 import { VibeError } from "../util/errors.js";
 
-export type ExecutionMode = "exec-hidden" | "terminal-visible" | "ghostty-visible" | "app-supervised" | "codex-app-thread";
+export type ExecutionMode = "exec-hidden" | "terminal-visible" | "ghostty-visible" | "codex-app-visible" | "app-supervised" | "codex-app-thread";
 
 export interface CodexExecCapabilities {
   supportsSandbox: boolean;
@@ -127,11 +128,30 @@ async function writePrompt(runDir: string, prompt: string) {
   return promptPath;
 }
 
+async function writeRootPromptHandoff(workspacePath: string, runId: string, promptPath: string, prompt: string) {
+  const rootPromptPath = path.join(workspacePath, "VIBE_CODEX_PROMPT.md");
+  const relativePromptPath = path.relative(workspacePath, promptPath);
+  await fs.writeFile(rootPromptPath, [
+    "# Vibe Codex Prompt",
+    "",
+    `Run ID: ${runId}`,
+    `Canonical prompt: ${relativePromptPath}`,
+    "",
+    "Paste/send the prompt below in Codex Desktop.",
+    "",
+    "---",
+    "",
+    prompt,
+  ].join("\n"), "utf8");
+  return rootPromptPath;
+}
+
 async function writeBaselineMetadata(args: {
   runDir: string;
   runId: string;
   workspacePath: string;
   promptPath: string;
+  rootPromptPath?: string;
   baselineStatus?: string;
   executionMode: ExecutionMode;
   terminalApp?: string;
@@ -146,6 +166,7 @@ async function writeBaselineMetadata(args: {
     runId: args.runId,
     workspacePath: args.workspacePath,
     promptPath: args.promptPath,
+    rootPromptPath: args.rootPromptPath,
     logPath: args.logPath,
     scriptPath: args.scriptPath,
     baselineStatusPath,
@@ -162,11 +183,16 @@ async function copyPromptToClipboard(args: {
   cwd: string;
   config: Config;
   copy?: boolean;
+  verify?: boolean;
+  delayBeforeMs?: number;
 }) {
-  if (args.copy === false) return { copied: false, stdout: "", stderr: "", exitCode: null };
-  const result = await runProcessArgv({
-    file: "/bin/sh",
-    args: ["-c", `command -v pbcopy >/dev/null 2>&1 && pbcopy < ${shellQuote(args.promptPath)}`],
+  if (args.copy === false) return { copied: false, stdout: "", stderr: "", exitCode: null, verified: false };
+  if (args.delayBeforeMs && args.delayBeforeMs > 0) await delay(args.delayBeforeMs);
+  const content = await fs.readFile(args.promptPath);
+  const expected = content.toString("utf8");
+  const copyOnce = () => runProcessArgv({
+    file: "pbcopy",
+    stdin: content,
     cwd: args.cwd,
     timeoutMs: 10_000,
     maxOutputBytes: args.config.maxCommandOutputBytes,
@@ -175,7 +201,38 @@ async function copyPromptToClipboard(args: {
     stderr: error instanceof Error ? error.message : String(error),
     exitCode: 1,
   }));
-  return { copied: result.exitCode === 0, stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+  const verifyOnce = () => runProcessArgv({
+    file: "pbpaste",
+    cwd: args.cwd,
+    timeoutMs: 10_000,
+    maxOutputBytes: args.config.maxCommandOutputBytes,
+  }).catch((error) => ({
+    stdout: "",
+    stderr: error instanceof Error ? error.message : String(error),
+    exitCode: 1,
+  }));
+  const firstCopy = await copyOnce();
+  if (!args.verify) {
+    return { copied: firstCopy.exitCode === 0, stdout: firstCopy.stdout, stderr: firstCopy.stderr, exitCode: firstCopy.exitCode, verified: false };
+  }
+  let verifyResult = await verifyOnce();
+  let verified = verifyResult.exitCode === 0 && verifyResult.stdout === expected;
+  let retryCopy: Awaited<ReturnType<typeof copyOnce>> | undefined;
+  if (firstCopy.exitCode === 0 && !verified) {
+    await delay(250);
+    retryCopy = await copyOnce();
+    verifyResult = await verifyOnce();
+    verified = verifyResult.exitCode === 0 && verifyResult.stdout === expected;
+  }
+  const stderr = [firstCopy.stderr, retryCopy?.stderr, verifyResult.stderr].filter(Boolean).join("\n");
+  const stdout = [firstCopy.stdout, retryCopy?.stdout].filter(Boolean).join("\n");
+  return {
+    copied: firstCopy.exitCode === 0 && (!retryCopy || retryCopy.exitCode === 0) && verified,
+    stdout,
+    stderr,
+    exitCode: retryCopy?.exitCode ?? firstCopy.exitCode,
+    verified,
+  };
 }
 
 export async function createTerminalVisibleRunArtifacts(args: {
@@ -314,10 +371,23 @@ export async function detectGhosttyDirectCodexSupport(appName: string): Promise<
   return helpText.includes("-e <command>") && configText.includes("working-directory");
 }
 
-async function createPromptOnlyRunArtifacts(workspacePath: string, runId: string, prompt: string) {
+async function createPromptOnlyRunArtifacts(workspacePath: string, runId: string, prompt: string, executionMode: ExecutionMode, config: Config) {
   const runDir = await ensureRunDir(workspacePath, runId);
   const promptPath = await writePrompt(runDir, prompt);
-  return { runDir, promptPath };
+  const rootPromptPath = executionMode === "codex-app-visible"
+    ? await writeRootPromptHandoff(workspacePath, runId, promptPath, prompt)
+    : undefined;
+  const baselineStatus = (await gitStatus(workspacePath, config).catch(() => undefined))?.stdout ?? "";
+  const { baselineStatusPath, finalStatusPath, metadataPath } = await writeBaselineMetadata({
+    runDir,
+    runId,
+    workspacePath,
+    promptPath,
+    rootPromptPath,
+    baselineStatus,
+    executionMode,
+  });
+  return { runDir, promptPath, rootPromptPath, baselineStatusPath, finalStatusPath, metadataPath };
 }
 
 async function buildUntrackedDiff(workspacePath: string, files: string[], maxBytes: number): Promise<string> {
@@ -466,6 +536,55 @@ export async function startGhosttyInteractiveCodexTask(args: {
   });
 }
 
+export async function startCodexAppVisibleTask(args: {
+  workspacePath: string;
+  prompt: string;
+  autonomy: AutonomyLevel;
+  config: Config;
+  runStore: RunStore;
+  openApp?: boolean;
+  copyClipboard?: boolean;
+  executionMode?: "codex-app-visible" | "app-supervised";
+}): Promise<RunRecord> {
+  const cwd = await assertSafeWorkspacePath(args.workspacePath, args.config);
+  const executionMode = args.executionMode ?? "codex-app-visible";
+  const placeholder = args.runStore.createRun({
+    workspacePath: cwd,
+    status: executionMode === "codex-app-visible" ? "app_visible_ready" : "running_visible",
+    autonomy: args.autonomy,
+    prompt: args.prompt,
+    command: executionMode === "codex-app-visible" ? "codex app visible prompt handoff" : "app-supervised prompt handoff",
+    metadata: { executionMode },
+  });
+  const artifacts = await createPromptOnlyRunArtifacts(cwd, placeholder.id, args.prompt, executionMode, args.config);
+  const appResult = args.openApp === false
+    ? undefined
+    : await runProcessArgv({ file: args.config.codexBin, args: ["app", cwd], cwd, timeoutMs: 30_000, maxOutputBytes: args.config.maxCommandOutputBytes });
+  const copyResult = args.copyClipboard === false
+    ? undefined
+    : await copyPromptToClipboard({ promptPath: artifacts.promptPath, cwd, config: args.config, copy: true, verify: true, delayBeforeMs: args.openApp === false ? 0 : 750 }).catch(() => undefined);
+  return args.runStore.updateRun(placeholder.id, {
+    status: executionMode === "codex-app-visible" ? "app_visible_ready" : "running_visible",
+    stdout: [appResult?.stdout, copyResult?.stdout].filter(Boolean).join("\n"),
+    stderr: [appResult?.stderr, copyResult?.stderr].filter(Boolean).join("\n"),
+    exitCode: appResult?.exitCode ?? null,
+    metadata: {
+      executionMode,
+      runDir: artifacts.runDir,
+      promptPath: artifacts.promptPath,
+      rootPromptPath: artifacts.rootPromptPath,
+      baselineStatusPath: artifacts.baselineStatusPath,
+      finalStatusPath: artifacts.finalStatusPath,
+      metadataPath: artifacts.metadataPath,
+      appOpened: appResult ? appResult.exitCode === 0 : false,
+      copiedToClipboard: copyResult ? copyResult.copied === true : false,
+      clipboardCopied: copyResult ? copyResult.copied === true : false,
+      clipboardExitCode: copyResult?.exitCode,
+      clipboardVerified: copyResult?.verified === true,
+    },
+  });
+}
+
 export async function startAppSupervisedCodexTask(args: {
   workspacePath: string;
   prompt: string;
@@ -475,34 +594,7 @@ export async function startAppSupervisedCodexTask(args: {
   openApp?: boolean;
   copyClipboard?: boolean;
 }): Promise<RunRecord> {
-  const cwd = await assertSafeWorkspacePath(args.workspacePath, args.config);
-  const placeholder = args.runStore.createRun({
-    workspacePath: cwd,
-    status: "running_visible",
-    autonomy: args.autonomy,
-    prompt: args.prompt,
-    command: "app-supervised prompt handoff",
-    metadata: { executionMode: "app-supervised" },
-  });
-  const artifacts = await createPromptOnlyRunArtifacts(cwd, placeholder.id, args.prompt);
-  const appResult = args.openApp === false
-    ? undefined
-    : await runProcessArgv({ file: args.config.codexBin, args: ["app", cwd], cwd, timeoutMs: 30_000, maxOutputBytes: args.config.maxCommandOutputBytes });
-  const copyResult = args.copyClipboard === false
-    ? undefined
-    : await runProcessArgv({ file: "/bin/sh", args: ["-c", `command -v pbcopy >/dev/null 2>&1 && cat ${shellQuote(artifacts.promptPath)} | pbcopy`], cwd, timeoutMs: 10_000, maxOutputBytes: args.config.maxCommandOutputBytes }).catch(() => undefined);
-  return args.runStore.updateRun(placeholder.id, {
-    stdout: [appResult?.stdout, copyResult?.stdout].filter(Boolean).join("\n"),
-    stderr: [appResult?.stderr, copyResult?.stderr].filter(Boolean).join("\n"),
-    exitCode: appResult?.exitCode ?? null,
-    metadata: {
-      executionMode: "app-supervised",
-      runDir: artifacts.runDir,
-      promptPath: artifacts.promptPath,
-      appOpened: appResult ? appResult.exitCode === 0 : false,
-      clipboardCopied: copyResult ? copyResult.exitCode === 0 : false,
-    },
-  });
+  return startCodexAppVisibleTask({ ...args, executionMode: "app-supervised" });
 }
 
 export async function collectVisibleRunResult(args: {
@@ -565,22 +657,23 @@ export async function collectVisibleRunResult(args: {
   const untrackedDiff = await buildUntrackedDiff(run.workspacePath, untrackedNewFiles, maxDiffBytes);
   const gitDiffSummary = [diff?.stdout ?? "", untrackedDiff].filter(Boolean).join("\n");
   const isInteractiveGhostty = run.metadata?.executionMode === "ghostty-visible";
+  const isCodexAppVisible = run.metadata?.executionMode === "codex-app-visible" || run.metadata?.executionMode === "app-supervised";
   const completedMarkers = ["**VIBE_CODEX_RUN_FINISHED**", "__VIBE_CODEX_RUN_FINISHED__", "Summary of changes:", "tokens used", "Codex finished."];
   const failureMarkers = ["Not inside a trusted directory", "error:", "fatal:"];
   const exitCodeMatch = log.match(/__VIBE_CODEX_RUN_EXIT_CODE=(-?\d+)/);
   const visibleExitCode = exitCodeMatch ? Number.parseInt(exitCodeMatch[1], 10) : undefined;
   const finishedMarker = log.includes("**VIBE_CODEX_RUN_FINISHED**") || log.includes("__VIBE_CODEX_RUN_FINISHED__");
-  const completedVisible = isInteractiveGhostty
+  const completedVisible = isInteractiveGhostty || isCodexAppVisible
     ? newChangedFilesSinceRun.length > 0
     : visibleExitCode === undefined
       ? completedMarkers.some((marker) => log.includes(marker))
       : finishedMarker && visibleExitCode === 0;
-  const failedVisible = !isInteractiveGhostty && !completedVisible && (
+  const failedVisible = !isInteractiveGhostty && !isCodexAppVisible && !completedVisible && (
     (finishedMarker && typeof visibleExitCode === "number" && visibleExitCode !== 0)
     || failureMarkers.some((marker) => log.toLowerCase().includes(marker.toLowerCase()))
   );
-  const collectedStatus = completedVisible ? "completed_visible" : failedVisible ? "failed_visible" : isInteractiveGhostty ? "unknown_interactive" : run.status;
-  if (collectedStatus !== run.status && (collectedStatus === "completed_visible" || collectedStatus === "failed_visible" || collectedStatus === "unknown_interactive")) {
+  const collectedStatus = completedVisible ? "completed_visible" : failedVisible ? "failed_visible" : isInteractiveGhostty ? "unknown_interactive" : isCodexAppVisible ? "unknown_app_visible" : run.status;
+  if (collectedStatus !== run.status && (collectedStatus === "completed_visible" || collectedStatus === "failed_visible" || collectedStatus === "unknown_interactive" || collectedStatus === "unknown_app_visible")) {
     args.runStore.updateRun(run.id, { status: collectedStatus });
   }
   if (metadataPath) {
@@ -620,10 +713,10 @@ export async function collectVisibleRunResult(args: {
     newChangedFilesSinceRun,
     changedFilesSinceRun: newChangedFilesSinceRun,
     summary: collectedStatus === "completed_visible"
-      ? isInteractiveGhostty ? "Interactive Codex run has workspace changes since the prompt handoff." : "Visible Codex run completed."
+      ? isInteractiveGhostty ? "Interactive Codex run has workspace changes since the prompt handoff." : isCodexAppVisible ? "Codex Desktop visible run has workspace changes since the prompt handoff." : "Visible Codex run completed."
       : collectedStatus === "failed_visible"
         ? "Visible Codex run appears to have failed."
-        : isInteractiveGhostty ? "Interactive Codex run has no reliable completion marker yet." : "Visible Codex run is still pending or running.",
+        : isInteractiveGhostty ? "Interactive Codex run has no reliable completion marker yet." : isCodexAppVisible ? "Codex Desktop visible run has no reliable completion marker yet." : "Visible Codex run is still pending or running.",
     doNotFallbackToDirectWrite: true,
   };
 }

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildCodexExecArgv, collectVisibleRunResult, createTerminalVisibleRunArtifacts, launchInteractiveCodexTerminal, launchVisibleTerminal, startAppSupervisedCodexTask, startGhosttyInteractiveCodexTask, startTerminalVisibleCodexTask } from "../src/codex/codexExec.js";
+import { buildCodexExecArgv, collectVisibleRunResult, createTerminalVisibleRunArtifacts, launchInteractiveCodexTerminal, launchVisibleTerminal, startAppSupervisedCodexTask, startCodexAppVisibleTask, startGhosttyInteractiveCodexTask, startTerminalVisibleCodexTask } from "../src/codex/codexExec.js";
 import { initRunStore, RunStore } from "../src/runs/runStore.js";
 import { tempConfig } from "./helpers.js";
 import { runProcessArgv } from "../src/util/spawn.js";
@@ -232,7 +232,46 @@ describe("Codex exec integration", () => {
     expect(run.status).toBe("running_visible");
     expect(run.codexCommand).toBe("app-supervised prompt handoff");
     await expect(fs.readFile(run.metadata!.promptPath as string, "utf8")).resolves.toBe("Paste this into the app");
+    await expect(fs.readFile(run.metadata!.metadataPath as string, "utf8")).resolves.toContain("\"executionMode\": \"app-supervised\"");
+    await expect(fs.readFile(run.metadata!.baselineStatusPath as string, "utf8")).resolves.toBe("");
     expect(run.metadata?.appOpened).toBe(false);
+  });
+
+  it("codex-app-visible writes prompt/metadata, opens Codex app, copies prompt, and does not use codex exec", async () => {
+    const binDir = path.join(ctx.root, "bin");
+    const codexLog = path.join(ctx.root, "codex-args.log");
+    const clipboardLog = path.join(ctx.root, "clipboard.txt");
+    await fs.mkdir(binDir);
+    await fs.writeFile(path.join(binDir, "codex"), `#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > ${JSON.stringify(codexLog)}\n`, { mode: 0o700 });
+    await fs.writeFile(path.join(binDir, "pbcopy"), `#!/usr/bin/env bash\ncat > ${JSON.stringify(clipboardLog)}\n`, { mode: 0o700 });
+    await fs.writeFile(path.join(binDir, "pbpaste"), `#!/usr/bin/env bash\ncat ${JSON.stringify(clipboardLog)}\n`, { mode: 0o700 });
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    try {
+      ctx.config.codexBin = path.join(binDir, "codex");
+      const run = await startCodexAppVisibleTask({
+        workspacePath: workspace,
+        prompt: "Paste this into Codex Desktop",
+        autonomy: "workspace",
+        config: ctx.config,
+        runStore: store,
+      });
+      expect(run.status).toBe("app_visible_ready");
+      expect(run.codexCommand).toBe("codex app visible prompt handoff");
+      expect(run.metadata?.executionMode).toBe("codex-app-visible");
+      expect(run.metadata?.appOpened).toBe(true);
+      expect(run.metadata?.copiedToClipboard).toBe(true);
+      expect(run.metadata?.clipboardCopied).toBe(true);
+      expect(run.metadata?.clipboardVerified).toBe(true);
+      await expect(fs.readFile(run.metadata!.promptPath as string, "utf8")).resolves.toBe("Paste this into Codex Desktop");
+      await expect(fs.readFile(run.metadata!.rootPromptPath as string, "utf8")).resolves.toContain("Paste this into Codex Desktop");
+      await expect(fs.readFile(run.metadata!.metadataPath as string, "utf8")).resolves.toContain("\"executionMode\": \"codex-app-visible\"");
+      await expect(fs.readFile(codexLog, "utf8")).resolves.toBe(`app\n${run.workspacePath}\n`);
+      await expect(fs.readFile(clipboardLog, "utf8")).resolves.toBe("Paste this into Codex Desktop");
+      expect(run.codexCommand).not.toContain("exec");
+    } finally {
+      process.env.PATH = originalPath;
+    }
   });
 
   it("collects visible completion status and changed files since baseline", async () => {
@@ -297,5 +336,35 @@ describe("Codex exec integration", () => {
     collected = await collectVisibleRunResult({ runId: run.id, config: ctx.config, runStore: store });
     expect(collected.status).toBe("completed_visible");
     expect(collected.changedFilesSinceRun).toContain("interactive-created.txt");
+  });
+
+  it("collects codex-app-visible runs from git baseline without codex.log", async () => {
+    await runProcessArgv({ file: "git", args: ["init"], cwd: workspace });
+    await fs.writeFile(path.join(workspace, "preexisting-untracked.txt"), "before", "utf8");
+    const run = await startCodexAppVisibleTask({
+      workspacePath: workspace,
+      prompt: "GUI prompt",
+      autonomy: "workspace",
+      config: ctx.config,
+      runStore: store,
+      openApp: false,
+      copyClipboard: false,
+    });
+    let collected = await collectVisibleRunResult({ runId: run.id, config: ctx.config, runStore: store });
+    expect(collected.status).toBe("unknown_app_visible");
+    expect(collected.logPath).toBeUndefined();
+    expect(collected.scriptPath).toBeUndefined();
+    expect(collected.changedFiles).toContain("preexisting-untracked.txt");
+    expect(collected.changedFiles).toContain("VIBE_CODEX_PROMPT.md");
+    expect(collected.newChangedFilesSinceRun).not.toContain("preexisting-untracked.txt");
+    expect(collected.newChangedFilesSinceRun).not.toContain("VIBE_CODEX_PROMPT.md");
+    expect(collected.doNotFallbackToDirectWrite).toBe(true);
+
+    await fs.writeFile(path.join(workspace, "gui-created.txt"), "created", "utf8");
+    collected = await collectVisibleRunResult({ runId: run.id, config: ctx.config, runStore: store });
+    expect(collected.status).toBe("completed_visible");
+    expect(collected.changedFilesSinceRun).toContain("gui-created.txt");
+    expect(collected.changedFilesSinceRun).not.toContain("preexisting-untracked.txt");
+    expect(collected.changedFilesSinceRun).not.toContain("VIBE_CODEX_PROMPT.md");
   });
 });

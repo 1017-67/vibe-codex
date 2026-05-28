@@ -227,7 +227,7 @@ describe("MCP Streamable HTTP sessions", () => {
     expect(payload.result.structuredContent.doNotFallbackToDirectWrite).toBe(true);
   });
 
-  it("start_codex_task defaults to ghostty-visible and approval-gates before launch when required", async () => {
+  it("start_codex_task defaults to codex-app-visible and approval-gates before launch when required", async () => {
     ctx.config.requireApprovalForCodexVisible = true;
     const workspace = `${ctx.root}/ghostty-default`;
     await import("node:fs/promises").then((fs) => fs.mkdir(workspace));
@@ -249,7 +249,63 @@ describe("MCP Streamable HTTP sessions", () => {
     const payload = parseMcpResponse(await response.text());
     expect(response.status).toBe(200);
     expect(payload.result.structuredContent.approvalRequired).toBe(true);
-    expect(payload.result.structuredContent.actionSummary.executionMode).toBe("ghostty-visible");
+    expect(payload.result.structuredContent.actionSummary.executionMode).toBe("codex-app-visible");
+  });
+
+  it("start_codex_task codex-app-visible returns app_visible_ready without codex exec or Ghostty", async () => {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const binDir = path.join(ctx.root, "bin");
+    const codexLog = path.join(ctx.root, "codex-args.log");
+    const clipboardLog = path.join(ctx.root, "clipboard.txt");
+    await fs.mkdir(binDir);
+    await fs.writeFile(path.join(binDir, "codex"), `#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then printf 'codex-cli test\\n'; exit 0; fi\nprintf '%s\\n' "$@" > ${JSON.stringify(codexLog)}\n`, { mode: 0o700 });
+    await fs.writeFile(path.join(binDir, "pbcopy"), `#!/usr/bin/env bash\ncat > ${JSON.stringify(clipboardLog)}\n`, { mode: 0o700 });
+    await fs.writeFile(path.join(binDir, "pbpaste"), `#!/usr/bin/env bash\ncat ${JSON.stringify(clipboardLog)}\n`, { mode: 0o700 });
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    try {
+      ctx.config.codexBin = path.join(binDir, "codex");
+      const workspace = `${ctx.root}/codex-app-visible`;
+      await fs.mkdir(workspace);
+      await import("../src/util/spawn.js").then(({ runProcessArgv }) => runProcessArgv({ file: "git", args: ["init"], cwd: workspace }));
+      const resolvedWorkspace = await fs.realpath(workspace);
+      const init = await initialize();
+      await (await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId!)).text();
+      const response = await postMcp({
+        jsonrpc: "2.0",
+        id: 171,
+        method: "tools/call",
+        params: {
+          name: "start_codex_task",
+          arguments: {
+            workspacePath: workspace,
+            userGoal: "Create one GUI-visible file",
+            executionMode: "codex-app-visible",
+          },
+        },
+      }, init.sessionId!);
+      const payload = parseMcpResponse(await response.text());
+      expect(response.status).toBe(200);
+      const result = payload.result.structuredContent;
+      expect(result.status).toBe("app_visible_ready");
+      expect(result.executionMode).toBe("codex-app-visible");
+      expect(result.workspacePath).toBe(resolvedWorkspace);
+      expect(result.promptPath).toContain(".vibe-codex/runs/");
+      expect(result.rootPromptPath).toContain("VIBE_CODEX_PROMPT.md");
+      expect(result.metadataPath).toContain(".vibe-codex/runs/");
+      expect(result.copiedToClipboard).toBe(true);
+      expect(result.clipboardVerified).toBe(true);
+      expect(result.message).toContain("Codex Desktop opened");
+      expect(result.message).toContain("AGENTS.md");
+      expect(result.message).toContain("VIBE_CODEX_PROMPT.md");
+      expect(result.message).toContain("No codex exec");
+      expect(result.message).toContain("shell script");
+      expect(await fs.readFile(codexLog, "utf8")).toBe(`app\n${resolvedWorkspace}\n`);
+      expect(await fs.readFile(clipboardLog, "utf8")).toContain("Create one GUI-visible file");
+    } finally {
+      process.env.PATH = originalPath;
+    }
   });
 
   it("detect_codex_app_server reports unavailable through MCP", async () => {
@@ -264,22 +320,29 @@ describe("MCP Streamable HTTP sessions", () => {
     const payload = parseMcpResponse(await response.text());
     expect(response.status).toBe(200);
     expect(payload.result.structuredContent.available).toBe(false);
-    expect(payload.result.structuredContent.details.recommendedExecutionMode).toBe("ghostty-visible");
+    expect(payload.result.structuredContent.details.recommendedExecutionMode).toBe("codex-app-visible");
+    expect(payload.result.structuredContent.details.fallbackExecutionModes).toEqual(["codex-app-visible", "ghostty-visible"]);
   });
 
   it("app-thread tools create run mappings for start, continue, resume, and fork", async () => {
+    const requests: Array<{ method?: string; url?: string; body?: any }> = [];
     const appServer = createNodeHttpServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const text = Buffer.concat(chunks).toString("utf8");
+      const body = text ? JSON.parse(text) : undefined;
+      requests.push({ method: req.method, url: req.url, body });
       const send = (body: unknown) => {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(body));
       };
       if (req.method === "GET" && req.url === "/health") return send({ status: "ok" });
       if (req.method === "GET" && req.url === "/threads") return send({ threads: [{ threadId: "thread-1" }] });
-      if (req.method === "POST" && req.url === "/threads") return send({ threadId: "thread-1", status: "running" });
-      if (req.method === "POST" && req.url === "/threads/thread-1/messages") return send({ threadId: "thread-1", status: "running" });
-      if (req.method === "POST" && req.url === "/threads/thread-1/resume") return send({ threadId: "thread-1", status: "running" });
-      if (req.method === "POST" && req.url === "/threads/thread-1/fork") return send({ threadId: "thread-2", status: "running" });
-      if (req.method === "GET" && req.url === "/threads/thread-1") return send({ threadId: "thread-1", status: "running" });
+      if (req.method === "POST" && req.url === "/threads") return send({ threadId: "thread-1", status: "running", summary: "started", events: [{ type: "thread.started" }] });
+      if (req.method === "POST" && req.url === "/threads/thread-1/messages") return send({ threadId: "thread-1", status: "running", summary: "continued", events: [{ type: "thread.message" }] });
+      if (req.method === "POST" && req.url === "/threads/thread-1/resume") return send({ threadId: "thread-1", status: "running", summary: "resumed", events: [{ type: "thread.resumed" }] });
+      if (req.method === "POST" && req.url === "/threads/thread-1/fork") return send({ threadId: "thread-2", status: "running", summary: "forked", events: [{ type: "thread.forked" }] });
+      if (req.method === "GET" && req.url === "/threads/thread-1") return send({ threadId: "thread-1", status: "running", summary: "status" });
       res.writeHead(404).end();
     });
     await new Promise<void>((resolve) => appServer.listen(0, resolve));
@@ -301,7 +364,13 @@ describe("MCP Streamable HTTP sessions", () => {
       }, init.sessionId!);
       const start = parseMcpResponse(await startResponse.text()).result.structuredContent;
       expect(start.runId).toBeTruthy();
+      expect(start.threadId).toBe("thread-1");
       expect(start.codexThreadId).toBe("thread-1");
+      expect(start.status).toBe("running");
+      expect(start.summary).toBe("started");
+      expect(start.appServerEvents).toEqual([{ type: "thread.started" }]);
+      expect(requests.find((request) => request.method === "POST" && request.url === "/threads")?.body).toMatchObject({ workspacePath: resolvedWorkspace });
+      expect(requests.find((request) => request.method === "POST" && request.url === "/threads")?.body.prompt).toContain("Start thread");
 
       const continueResponse = await postMcp({
         jsonrpc: "2.0",
@@ -311,7 +380,11 @@ describe("MCP Streamable HTTP sessions", () => {
       }, init.sessionId!);
       const continued = parseMcpResponse(await continueResponse.text()).result.structuredContent;
       expect(continued.runId).toBeTruthy();
+      expect(continued.threadId).toBe("thread-1");
+      expect(continued.status).toBe("running");
+      expect(continued.summary).toBe("continued");
       expect(continued.workspacePath).toBe(resolvedWorkspace);
+      expect(requests.find((request) => request.method === "POST" && request.url === "/threads/thread-1/messages")?.body).toMatchObject({ threadId: "thread-1", instruction: "Continue thread" });
 
       const resumeResponse = await postMcp({
         jsonrpc: "2.0",
@@ -322,6 +395,9 @@ describe("MCP Streamable HTTP sessions", () => {
       const resumed = parseMcpResponse(await resumeResponse.text()).result.structuredContent;
       expect(resumed.runId).toBeTruthy();
       expect(resumed.threadId).toBe("thread-1");
+      expect(resumed.status).toBe("running");
+      expect(resumed.summary).toBe("resumed");
+      expect(requests.find((request) => request.method === "POST" && request.url === "/threads/thread-1/resume")?.body).toMatchObject({ threadId: "thread-1", workspacePath: resolvedWorkspace, prompt: "Resume thread" });
 
       const forkResponse = await postMcp({
         jsonrpc: "2.0",
@@ -331,7 +407,11 @@ describe("MCP Streamable HTTP sessions", () => {
       }, init.sessionId!);
       const forked = parseMcpResponse(await forkResponse.text()).result.structuredContent;
       expect(forked.runId).toBeTruthy();
+      expect(forked.threadId).toBe("thread-2");
       expect(forked.codexThreadId).toBe("thread-2");
+      expect(forked.sourceThreadId).toBe("thread-1");
+      expect(forked.summary).toBe("forked");
+      expect(requests.find((request) => request.method === "POST" && request.url === "/threads/thread-1/fork")?.body).toMatchObject({ threadId: "thread-1", workspacePath: resolvedWorkspace, instruction: "Fork thread" });
 
       ctx.config.codexBin = "definitely-not-installed-codex";
       const startViaGenericResponse = await postMcp({
@@ -349,11 +429,130 @@ describe("MCP Streamable HTTP sessions", () => {
       }, init.sessionId!);
       const genericStart = parseMcpResponse(await startViaGenericResponse.text()).result.structuredContent;
       expect(genericStart.runId).toBeTruthy();
+      expect(genericStart.threadId).toBe("thread-1");
       expect(genericStart.codexThreadId).toBe("thread-1");
+      expect(genericStart.status).toBe("running");
       expect(genericStart.executionMode).toBe("codex-app-thread");
+
+      const statusResponse = await postMcp({
+        jsonrpc: "2.0",
+        id: 23,
+        method: "tools/call",
+        params: { name: "get_codex_app_thread_status", arguments: { threadId: "thread-1" } },
+      }, init.sessionId!);
+      const status = parseMcpResponse(await statusResponse.text()).result.structuredContent;
+      expect(status.threadId).toBe("thread-1");
+      expect(status.status).toBe("running");
+      expect(status.summary).toBe("status");
     } finally {
       await new Promise<void>((resolve) => appServer.close(() => resolve()));
     }
+  });
+
+  it("project tools reuse registered workspaces and send no-paste app-thread prompts", async () => {
+    const requests: Array<{ method?: string; url?: string; body?: any }> = [];
+    const appServer = createNodeHttpServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const text = Buffer.concat(chunks).toString("utf8");
+      const body = text ? JSON.parse(text) : undefined;
+      requests.push({ method: req.method, url: req.url, body });
+      const send = (payload: unknown) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(payload));
+      };
+      if (req.method === "GET" && req.url === "/health") return send({ status: "ok" });
+      if (req.method === "POST" && req.url === "/threads") return send({ threadId: "project-thread-1", status: "running", summary: "started" });
+      if (req.method === "POST" && req.url === "/threads/project-thread-1/messages") return send({ threadId: "project-thread-1", status: "running", summary: "continued" });
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => appServer.listen(0, resolve));
+    try {
+      const address = appServer.address() as AddressInfo;
+      ctx.config.codexAppServerUrl = `http://127.0.0.1:${address.port}`;
+      const workspace = `${ctx.root}/registered-project`;
+      await import("node:fs/promises").then((fs) => fs.mkdir(workspace));
+      await import("../src/util/spawn.js").then(({ runProcessArgv }) => runProcessArgv({ file: "git", args: ["init"], cwd: workspace }));
+      const resolvedWorkspace = await import("node:fs/promises").then((fs) => fs.realpath(workspace));
+      const init = await initialize();
+      await (await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId!)).text();
+
+      const registerResponse = await postMcp({
+        jsonrpc: "2.0",
+        id: 30,
+        method: "tools/call",
+        params: { name: "register_project", arguments: { name: "Registered Project", workspacePath: workspace, preferredExecutionMode: "codex-app-thread" } },
+      }, init.sessionId!);
+      const registered = parseMcpResponse(await registerResponse.text()).result.structuredContent;
+      expect(registered.createdWorkspace).toBe(false);
+      expect(registered.project.path).toBe(resolvedWorkspace);
+
+      const startResponse = await postMcp({
+        jsonrpc: "2.0",
+        id: 31,
+        method: "tools/call",
+        params: { name: "start_project_task", arguments: { projectRef: "Registered Project", userGoal: "Project start goal" } },
+      }, init.sessionId!);
+      const started = parseMcpResponse(await startResponse.text()).result.structuredContent;
+      expect(started.project.id).toBe(registered.project.id);
+      expect(started.createdWorkspace).toBe(false);
+      expect(started.noPaste).toBe(true);
+      expect(started.threadId).toBe("project-thread-1");
+      const startBody = requests.find((request) => request.method === "POST" && request.url === "/threads")?.body;
+      expect(startBody.workspacePath).toBe(resolvedWorkspace);
+      expect(startBody.prompt).toContain("Source: ChatGPT via Vibe Codex");
+      expect(startBody.prompt).toContain(`projectId: ${registered.project.id}`);
+      expect(startBody.prompt).toContain("Project start goal");
+
+      const continueResponse = await postMcp({
+        jsonrpc: "2.0",
+        id: 32,
+        method: "tools/call",
+        params: { name: "continue_project_task", arguments: { projectRef: registered.project.id, instruction: "Continue project" } },
+      }, init.sessionId!);
+      const continued = parseMcpResponse(await continueResponse.text()).result.structuredContent;
+      expect(continued.threadId).toBe("project-thread-1");
+      const continueBody = requests.find((request) => request.method === "POST" && request.url === "/threads/project-thread-1/messages")?.body;
+      expect(continueBody.instruction).toContain("Continue project");
+      expect(continueBody.instruction).toContain("codexThreadId: project-thread-1");
+
+      const runsResponse = await postMcp({
+        jsonrpc: "2.0",
+        id: 33,
+        method: "tools/call",
+        params: { name: "list_project_runs", arguments: { projectRef: registered.project.id } },
+      }, init.sessionId!);
+      const runs = parseMcpResponse(await runsResponse.text()).result.structuredContent.runs;
+      expect(runs.length).toBeGreaterThanOrEqual(2);
+      expect(runs.every((run: any) => run.metadata.projectId === registered.project.id)).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => appServer.close(() => resolve()));
+    }
+  });
+
+  it("start_project_task returns a clear fallback when app-server is unavailable", async () => {
+    const workspace = `${ctx.root}/registered-no-server`;
+    await import("node:fs/promises").then((fs) => fs.mkdir(workspace));
+    await import("../src/util/spawn.js").then(({ runProcessArgv }) => runProcessArgv({ file: "git", args: ["init"], cwd: workspace }));
+    const init = await initialize();
+    await (await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId!)).text();
+    const registerResponse = await postMcp({
+      jsonrpc: "2.0",
+      id: 34,
+      method: "tools/call",
+      params: { name: "register_project", arguments: { name: "No Server Project", workspacePath: workspace, preferredExecutionMode: "codex-app-thread" } },
+    }, init.sessionId!);
+    const registered = parseMcpResponse(await registerResponse.text()).result.structuredContent;
+    const startResponse = await postMcp({
+      jsonrpc: "2.0",
+      id: 35,
+      method: "tools/call",
+      params: { name: "start_project_task", arguments: { projectRef: registered.project.id, userGoal: "No server goal" } },
+    }, init.sessionId!);
+    const payload = parseMcpResponse(await startResponse.text());
+    expect(payload.result.isError).toBe(true);
+    expect(payload.result.structuredContent.error.code).toBe("CODEX_APP_SERVER_UNAVAILABLE");
+    expect(payload.result.structuredContent.error.details.fallbackExecutionModes).toEqual(["app-supervised", "codex-app-visible", "ghostty-visible"]);
   });
 
   it("start_codex_task fails clearly when workspace is not Git", async () => {
