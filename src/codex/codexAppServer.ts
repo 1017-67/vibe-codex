@@ -17,7 +17,12 @@ export interface CodexAppThreadResult {
 }
 
 function baseUrl(config: Config): string | undefined {
-  return config.codexAppServerUrl?.replace(/\/+$/, "");
+  const configured = config.codexAppServerUrl;
+  if (!configured) return undefined;
+  const parsed = new URL(configured);
+  if (parsed.protocol === "ws:") parsed.protocol = "http:";
+  if (parsed.protocol === "wss:") parsed.protocol = "https:";
+  return parsed.toString().replace(/\/+$/, "");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -320,8 +320,8 @@ describe("MCP Streamable HTTP sessions", () => {
     const payload = parseMcpResponse(await response.text());
     expect(response.status).toBe(200);
     expect(payload.result.structuredContent.available).toBe(false);
-    expect(payload.result.structuredContent.details.recommendedExecutionMode).toBe("codex-app-visible");
-    expect(payload.result.structuredContent.details.fallbackExecutionModes).toEqual(["codex-app-visible", "ghostty-visible"]);
+    expect(payload.result.structuredContent.details.recommendedExecutionMode).toBe("codex-app-thread");
+    expect(payload.result.structuredContent.details.fallbackExecutionModes).toEqual(["app-supervised", "codex-app-visible", "ghostty-visible"]);
   });
 
   it("app-thread tools create run mappings for start, continue, resume, and fork", async () => {
@@ -528,6 +528,91 @@ describe("MCP Streamable HTTP sessions", () => {
     } finally {
       await new Promise<void>((resolve) => appServer.close(() => resolve()));
     }
+  });
+
+  it("project app-thread auto-starts a local app-server through the manager", async () => {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const net = await import("node:net");
+    const port = await new Promise<number>((resolve) => {
+      const server = net.createServer();
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address() as AddressInfo;
+        server.close(() => resolve(address.port));
+      });
+    });
+    const fakeCodex = path.join(ctx.root, "fake-codex");
+    await fs.writeFile(fakeCodex, `#!/usr/bin/env node
+const http = require("node:http");
+const listenArg = process.argv[process.argv.indexOf("--listen") + 1];
+const url = new URL(listenArg);
+const server = http.createServer(async (req, res) => {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  const text = Buffer.concat(chunks).toString("utf8");
+  const body = text ? JSON.parse(text) : undefined;
+  const send = (payload) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(payload));
+  };
+  if (req.method === "GET" && req.url === "/health") return send({ status: "ok" });
+  if (req.method === "POST" && req.url === "/threads") return send({ threadId: "auto-thread", status: "running", body });
+  if (req.method === "POST" && req.url === "/threads/auto-thread/messages") return send({ threadId: "auto-thread", status: "running", body });
+  res.writeHead(404).end();
+});
+server.listen(Number(url.port), url.hostname);
+process.on("SIGTERM", () => server.close(() => process.exit(0)));
+`);
+    await fs.chmod(fakeCodex, 0o755);
+    ctx.config.codexAppServerMode = "auto";
+    ctx.config.codexAppServerUrl = undefined;
+    ctx.config.codexAppServerPort = port;
+    ctx.config.codexBin = fakeCodex;
+
+    const workspace = `${ctx.root}/auto-managed-project`;
+    await fs.mkdir(workspace);
+    await import("../src/util/spawn.js").then(({ runProcessArgv }) => runProcessArgv({ file: "git", args: ["init"], cwd: workspace }));
+    const init = await initialize();
+    await (await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId!)).text();
+
+    const registerResponse = await postMcp({
+      jsonrpc: "2.0",
+      id: 36,
+      method: "tools/call",
+      params: { name: "register_project", arguments: { name: "Auto Managed Project", workspacePath: workspace, preferredExecutionMode: "codex-app-thread" } },
+    }, init.sessionId!);
+    const registered = parseMcpResponse(await registerResponse.text()).result.structuredContent;
+
+    const startResponse = await postMcp({
+      jsonrpc: "2.0",
+      id: 37,
+      method: "tools/call",
+      params: { name: "start_project_task", arguments: { projectRef: registered.project.id, userGoal: "Auto start goal" } },
+    }, init.sessionId!);
+    const started = parseMcpResponse(await startResponse.text()).result.structuredContent;
+    expect(started.threadId).toBe("auto-thread");
+    expect(started.noPaste).toBe(true);
+    expect(started.appServer.startedByVibeCodex).toBe(true);
+    expect(started.appServer.url).toBe(`http://127.0.0.1:${port}`);
+    expect(started.appServer.listenUrl).toBe(`ws://127.0.0.1:${port}`);
+
+    const continueResponse = await postMcp({
+      jsonrpc: "2.0",
+      id: 38,
+      method: "tools/call",
+      params: { name: "continue_project_task", arguments: { projectRef: registered.project.id, instruction: "Reuse default thread" } },
+    }, init.sessionId!);
+    const continued = parseMcpResponse(await continueResponse.text()).result.structuredContent;
+    expect(continued.threadId).toBe("auto-thread");
+    expect(continued.project.defaultCodexThreadId).toBe("auto-thread");
+
+    const stopResponse = await postMcp({
+      jsonrpc: "2.0",
+      id: 39,
+      method: "tools/call",
+      params: { name: "stop_codex_app_server", arguments: {} },
+    }, init.sessionId!);
+    expect(parseMcpResponse(await stopResponse.text()).result.structuredContent.available).toBe(false);
   });
 
   it("start_project_task returns a clear fallback when app-server is unavailable", async () => {

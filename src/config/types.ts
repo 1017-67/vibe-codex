@@ -1,5 +1,7 @@
 export type AutonomyLevel = "manual" | "workspace" | "build-test" | "full-project";
 export type DefaultVisibleMode = "codex-app-visible" | "ghostty-visible";
+export type CodexAppServerMode = "disabled" | "manual" | "auto";
+export type CodexAppServerTransport = "ws" | "http";
 
 export interface Config {
   port: number;
@@ -19,7 +21,14 @@ export interface Config {
   terminalFallbackApp: string;
   preferGhostty: boolean;
   defaultVisibleMode: DefaultVisibleMode;
+  codexAppServerMode: CodexAppServerMode;
   codexAppServerUrl?: string;
+  codexAppServerPort: number;
+  codexAppServerHost: string;
+  codexAppServerTransport: CodexAppServerTransport;
+  codexAppServerAutostart: boolean;
+  codexAppServerLogDir: string;
+  codexAppServerAllowPublicHost: boolean;
   databasePath: string;
   defaultCodexApproval: string;
   defaultCodexSandbox: string;

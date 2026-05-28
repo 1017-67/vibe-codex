@@ -83,15 +83,19 @@ Call `relay_health`, then `connector_setup_status`.
 4. Confirm no generated `run-codex.sh`, `codex.log`, hidden exec, shell pipe, GUI typing, or `codex exec` is used for `ghostty-visible`.
 5. Let Codex create the requested file, then call `collect_visible_run_result`.
 
-## App-Thread Detection
+## MCP-Managed App-Server
 
 1. Call `detect_codex_app_server`.
-2. If `CODEX_APP_SERVER_URL` is unset, confirm:
+2. If `CODEX_APP_SERVER_MODE=disabled` or startup is unavailable, confirm:
    - `available` is `false`.
-   - result recommends `codex-app-visible` and also lists `ghostty-visible` as a fallback.
-3. If a Codex app-server is configured, call `list_codex_threads`, then `start_codex_app_thread` against a safe workspace.
-4. Confirm app-thread responses include `runId`, `threadId`, `status`, `workspacePath`, and any returned `summary`/events.
-5. For existing threads, smoke `continue_codex_app_thread`, `resume_codex_app_thread`, `fork_codex_app_thread`, and `get_codex_app_thread_status`.
+   - result includes `mode`, `transport`, and a `lastError` when available.
+3. With `CODEX_APP_SERVER_MODE=auto`, call `start_codex_app_server`.
+4. Confirm startup binds only to `127.0.0.1`, returns `available`, `url`, `listenUrl`, `transport`, `pid`, `startedByVibeCodex`, and `logDir`.
+5. Call `get_codex_app_server_status`; confirm it matches the running server.
+6. Call `list_codex_threads`, then `start_codex_app_thread` against a safe Git workspace.
+7. Confirm app-thread responses include `runId`, `threadId`, `status`, `workspacePath`, and any returned `summary`/events.
+8. For existing threads, smoke `continue_codex_app_thread`, `resume_codex_app_thread`, `fork_codex_app_thread`, and `get_codex_app_thread_status`.
+9. Call `stop_codex_app_server`; confirm only the Vibe Codex-managed process stops.
 
 ## Registered Project Reuse
 
@@ -108,12 +112,13 @@ Call `relay_health`, then `connector_setup_status`.
 2. Confirm the result includes `createdWorkspace: false`, `reusedExistingWorkspace: true`, `projectId`, and the same `workspacePath`.
 3. Call `list_projects` and `get_project`; confirm the registered project is returned with `lastUsedAt`.
 4. Call `resume_project`; confirm the same workspace is returned and no new folder is created.
-5. Call `start_project_task` with a harmless inspection prompt.
-6. If `CODEX_APP_SERVER_URL` is unset or unreachable, confirm the tool returns `CODEX_APP_SERVER_UNAVAILABLE` with fallback modes including `codex-app-visible` and `ghostty-visible`.
-7. If app-server is available, confirm the tool returns `noPaste: true`, a `threadId`, `runId`, `projectId`, and a prompt containing `Source: ChatGPT via Vibe Codex`.
-8. Call `continue_project_task`; confirm it reuses the project's default thread when one was stored.
-9. Call `list_project_runs`, `list_project_threads`, and `collect_project_result`; confirm run metadata links the same `projectId`, `workspacePath`, `runId`, and `threadId`.
-10. Confirm no new workspace was created during `start_project_task` or `continue_project_task`.
+5. Call `start_project_task` with a harmless inspection prompt and `executionMode: "codex-app-thread"`.
+6. If `CODEX_APP_SERVER_MODE=auto`, confirm Vibe Codex detects or starts the app-server; no `CODEX_APP_SERVER_URL` should be required.
+7. If app-server startup fails, confirm the tool returns `CODEX_APP_SERVER_UNAVAILABLE` with fallback modes including `codex-app-visible` and `ghostty-visible`.
+8. If app-server is available, confirm the tool returns `noPaste: true`, a `threadId`, `runId`, `projectId`, app-server status, and a prompt containing `Source: ChatGPT via Vibe Codex`.
+9. Call `continue_project_task`; confirm it reuses the project's default thread when one was stored.
+10. Call `list_project_runs`, `list_project_threads`, and `collect_project_result`; confirm run metadata links the same `projectId`, `workspacePath`, `runId`, and `threadId`.
+11. Confirm no new workspace was created during `start_project_task` or `continue_project_task`.
 
 ## Legacy Terminal Visible Run
 

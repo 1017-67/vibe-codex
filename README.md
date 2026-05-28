@@ -53,7 +53,13 @@ TERMINAL_APP=ghostty
 TERMINAL_FALLBACK_APP=Terminal
 PREFER_GHOSTTY=true
 DEFAULT_VISIBLE_MODE=codex-app-visible
+CODEX_APP_SERVER_MODE=auto
 CODEX_APP_SERVER_URL=
+CODEX_APP_SERVER_PORT=8765
+CODEX_APP_SERVER_HOST=127.0.0.1
+CODEX_APP_SERVER_TRANSPORT=ws
+CODEX_APP_SERVER_AUTOSTART=true
+CODEX_APP_SERVER_LOG_DIR=.vibe-codex/app-server
 DATABASE_PATH=./vibe-codex.sqlite
 DEFAULT_CODEX_APPROVAL=untrusted
 DEFAULT_CODEX_SANDBOX=workspace-write
@@ -200,6 +206,10 @@ Dynamic client registration remains unauthenticated when experimental OAuth is e
 - `start_codex_task`
 - `continue_codex_task`
 - `detect_codex_app_server`
+- `start_codex_app_server`
+- `stop_codex_app_server`
+- `restart_codex_app_server`
+- `get_codex_app_server_status`
 - `list_codex_threads`
 - `start_codex_app_thread`
 - `resume_codex_app_thread`
@@ -243,12 +253,12 @@ Use `register_project` for an existing repository or workspace. Registration val
 - `ghostty-visible` is the stable terminal fallback. It writes `.vibe-codex/runs/<runId>/prompt.md` and metadata, then opens normal interactive `codex` in Ghostty with the full prompt passed as the initial prompt argument. No `run-codex.sh`, `codex.log`, hidden exec, shell pipe, GUI typing, or `codex exec` is used in this mode.
 - `terminal-visible` is the legacy supervised script mode. It writes `run-codex.sh` and `codex.log`, then opens macOS Terminal directly.
 - `app-supervised` is a compatibility alias for the older Codex Desktop prompt handoff behavior.
-- `codex-app-thread` is experimental. It uses configured Codex app-server HTTP APIs when `CODEX_APP_SERVER_URL` is set and reachable. It can start a new app thread, resume an existing thread, continue a mapped thread, fork a thread, list threads, and read thread status. Tool results normalize `runId`, `threadId`, `status`, `workspacePath`, `summary`, and app-server events while preserving the raw app-server response. If unavailable, tools return a clear error recommending `codex-app-visible` or `ghostty-visible`.
+- `codex-app-thread` is experimental. It uses a local Codex app-server for no-paste app/thread execution. In `CODEX_APP_SERVER_MODE=auto`, Vibe Codex first detects a healthy configured or local server and then starts one with `codex app-server --listen ws://127.0.0.1:<port>` when `CODEX_APP_SERVER_AUTOSTART=true`. It can start a new app thread, resume an existing thread, continue a mapped thread, fork a thread, list threads, and read thread status. Tool results normalize `runId`, `threadId`, `status`, `workspacePath`, `summary`, and app-server events while preserving the raw app-server response. If unavailable, tools return a clear error recommending `codex-app-visible` or `ghostty-visible`.
 - `exec-hidden` runs `codex exec` synchronously and returns captured stdout/stderr. It is not the default and requires `allowHiddenCodex: true` or a one-time approval.
 
 Project tools use the project `preferredExecutionMode` unless the tool call overrides it:
 
-- `codex-app-thread` is the no-paste Codex Desktop path. It requires `CODEX_APP_SERVER_URL` and sends prompts through app-server thread APIs. It can start, resume, continue, or fork threads and stores the returned Codex thread ID on the project when requested.
+- `codex-app-thread` is the no-paste Codex Desktop path. It uses the MCP-managed app-server when available and sends prompts through app-server thread APIs. It can start, resume, continue, or fork threads and stores the returned Codex thread ID on the project when requested.
 - `codex-app-visible` opens Codex Desktop and writes/copies a handoff prompt. This is a manual GUI fallback; the user still sends the prompt in the app.
 - `ghostty-visible` opens normal interactive Codex in Ghostty and submits the initial prompt automatically. This is the stable visible fallback when app-server is unavailable.
 
@@ -269,13 +279,33 @@ PREFER_GHOSTTY=true
 DEFAULT_VISIBLE_MODE=codex-app-visible
 ```
 
-Experimental app-thread configuration:
+App-server configuration:
 
 ```env
-CODEX_APP_SERVER_URL=http://127.0.0.1:<port>
+CODEX_APP_SERVER_MODE=auto
+CODEX_APP_SERVER_URL=
+CODEX_APP_SERVER_PORT=8765
+CODEX_APP_SERVER_HOST=127.0.0.1
+CODEX_APP_SERVER_TRANSPORT=ws
+CODEX_APP_SERVER_AUTOSTART=true
+CODEX_APP_SERVER_LOG_DIR=.vibe-codex/app-server
 ```
 
-Vibe Codex does not GUI-automate Codex Desktop. App-thread tools only call app-server APIs when they are explicitly configured and reachable, and the relay never exposes raw app-server access externally.
+Modes:
+
+- `disabled`: never use app-server.
+- `manual`: only use `CODEX_APP_SERVER_URL`.
+- `auto`: detect `CODEX_APP_SERVER_URL`, then detect `ws://127.0.0.1:<port>`, then start a local app-server when autostart is enabled.
+
+Lifecycle tools:
+
+- `detect_codex_app_server`: probe without starting.
+- `start_codex_app_server`: start or connect to a local app-server.
+- `stop_codex_app_server`: stop only a Vibe Codex-managed process.
+- `restart_codex_app_server`: restart the managed process.
+- `get_codex_app_server_status`: report availability, URL, transport, PID, log dir, and last error.
+
+Vibe Codex does not GUI-automate Codex Desktop. App-thread tools only call local app-server APIs, bind startup to `127.0.0.1` by default, and the relay never exposes raw app-server access externally. If the user asks for no-paste Codex app execution, use `codex-app-thread`; if unavailable, call `start_codex_app_server`; if startup still fails, recommend `codex-app-visible` or `ghostty-visible`.
 
 ## Approval Gates
 

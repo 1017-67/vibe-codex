@@ -2,7 +2,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomBytes } from "node:crypto";
 import dotenv from "dotenv";
-import { Config, DefaultVisibleMode } from "./types.js";
+import { CodexAppServerMode, CodexAppServerTransport, Config, DefaultVisibleMode } from "./types.js";
 import { VibeError } from "../util/errors.js";
 
 dotenv.config();
@@ -34,6 +34,18 @@ function defaultVisibleMode(value: string | undefined): DefaultVisibleMode {
     throw new VibeError("CONFIG_ERROR", "DEFAULT_VISIBLE_MODE must be codex-app-visible or ghostty-visible.", { configured: value });
   }
   return "codex-app-visible";
+}
+
+function codexAppServerMode(value: string | undefined): CodexAppServerMode {
+  if (value === "disabled" || value === "manual" || value === "auto") return value;
+  if (value) throw new VibeError("CONFIG_ERROR", "CODEX_APP_SERVER_MODE must be disabled, manual, or auto.", { configured: value });
+  return "auto";
+}
+
+function codexAppServerTransport(value: string | undefined): CodexAppServerTransport {
+  if (value === "ws" || value === "http") return value;
+  if (value) throw new VibeError("CONFIG_ERROR", "CODEX_APP_SERVER_TRANSPORT must be ws or http.", { configured: value });
+  return "ws";
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -70,6 +82,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const allowedRoots = splitPaths(env.ALLOWED_ROOTS, [path.resolve(process.cwd())]);
   const defaultParentDir = path.resolve(expandHome(env.DEFAULT_PARENT_DIR ?? allowedRoots[0] ?? process.cwd()));
+  const appServerHost = env.CODEX_APP_SERVER_HOST || "127.0.0.1";
 
   return {
     port: int(env.PORT, 8787),
@@ -89,7 +102,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     terminalFallbackApp: env.TERMINAL_FALLBACK_APP || "Terminal",
     preferGhostty: bool(env.PREFER_GHOSTTY, true),
     defaultVisibleMode: defaultVisibleMode(env.DEFAULT_VISIBLE_MODE),
+    codexAppServerMode: codexAppServerMode(env.CODEX_APP_SERVER_MODE),
     codexAppServerUrl: env.CODEX_APP_SERVER_URL || undefined,
+    codexAppServerPort: int(env.CODEX_APP_SERVER_PORT, 8765),
+    codexAppServerHost: appServerHost,
+    codexAppServerTransport: codexAppServerTransport(env.CODEX_APP_SERVER_TRANSPORT),
+    codexAppServerAutostart: bool(env.CODEX_APP_SERVER_AUTOSTART, true),
+    codexAppServerLogDir: path.resolve(expandHome(env.CODEX_APP_SERVER_LOG_DIR ?? ".vibe-codex/app-server")),
+    codexAppServerAllowPublicHost: bool(env.CODEX_APP_SERVER_ALLOW_PUBLIC_HOST, false),
     databasePath: path.resolve(env.DATABASE_PATH ?? "./vibe-codex.sqlite"),
     defaultCodexApproval: env.DEFAULT_CODEX_APPROVAL || "untrusted",
     defaultCodexSandbox: env.DEFAULT_CODEX_SANDBOX || "workspace-write",
