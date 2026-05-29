@@ -604,6 +604,78 @@ describe("MCP Streamable HTTP sessions", () => {
     }
   });
 
+  it("marks continue_project_task failed when turn/start fails after thread resume", async () => {
+    const requests: Array<{ method?: string; params?: any }> = [];
+    const failingServer = createNodeHttpServer((req, res) => {
+      if (req.method === "GET" && (req.url === "/healthz" || req.url === "/readyz" || req.url === "/health")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    const failingWs = new WebSocketServer({ server: failingServer });
+    failingWs.on("connection", (socket) => {
+      socket.on("message", (data) => {
+        const request = JSON.parse(data.toString("utf8"));
+        if (!request.id) return;
+        requests.push({ method: request.method, params: request.params });
+        const respond = (result: unknown) => socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+        if (request.method === "initialize") return respond({ protocolVersion: "0.1" });
+        if (request.method === "thread/resume") return respond({ thread: { id: request.params.threadId, status: { type: "idle" } } });
+        if (request.method === "turn/start") return socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: "turn rejected" } }));
+      });
+    });
+    await new Promise<void>((resolve) => failingServer.listen(0, resolve));
+    try {
+      const address = failingServer.address() as AddressInfo;
+      ctx.config.codexAppServerUrl = `ws://127.0.0.1:${address.port}`;
+      const workspace = `${ctx.root}/partial-continue-project`;
+      await import("node:fs/promises").then((fs) => fs.mkdir(workspace));
+      await import("../src/util/spawn.js").then(({ runProcessArgv }) => runProcessArgv({ file: "git", args: ["init"], cwd: workspace }));
+      const init = await initialize();
+      await (await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId!)).text();
+      const registerResponse = await postMcp({
+        jsonrpc: "2.0",
+        id: 45,
+        method: "tools/call",
+        params: { name: "register_project", arguments: { name: "Partial Continue Project", workspacePath: workspace, preferredExecutionMode: "codex-app-thread" } },
+      }, init.sessionId!);
+      const registered = parseMcpResponse(await registerResponse.text()).result.structuredContent;
+      await postMcp({
+        jsonrpc: "2.0",
+        id: 46,
+        method: "tools/call",
+        params: { name: "set_project_default_thread", arguments: { projectRef: registered.project.id, codexThreadId: "existing-thread" } },
+      }, init.sessionId!);
+      const continueResponse = await postMcp({
+        jsonrpc: "2.0",
+        id: 47,
+        method: "tools/call",
+        params: { name: "continue_project_task", arguments: { projectRef: registered.project.id, instruction: "Will fail after resume" } },
+      }, init.sessionId!);
+      const failed = parseMcpResponse(await continueResponse.text());
+      expect(failed.result.isError).toBe(true);
+      expect(failed.result.structuredContent.error.details.codexThreadId).toBe("existing-thread");
+      expect(failed.result.structuredContent.error.details.turnStartFailed).toBe(true);
+
+      const runsResponse = await postMcp({
+        jsonrpc: "2.0",
+        id: 48,
+        method: "tools/call",
+        params: { name: "list_project_runs", arguments: { projectRef: registered.project.id } },
+      }, init.sessionId!);
+      const runs = parseMcpResponse(await runsResponse.text()).result.structuredContent.runs;
+      expect(runs[0].status).toBe("failed");
+      expect(runs[0].metadata.codexThreadId).toBe("existing-thread");
+      expect(runs[0].metadata.turnStartFailed).toBe(true);
+      expect(requests.map((request) => request.method)).toContain("thread/resume");
+      expect(requests.map((request) => request.method)).toContain("turn/start");
+    } finally {
+      await new Promise<void>((resolve) => failingWs.close(() => failingServer.close(() => resolve())));
+    }
+  });
+
   it("project app-thread auto-starts a local app-server through the manager", async () => {
     const fs = await import("node:fs/promises");
     const path = await import("node:path");

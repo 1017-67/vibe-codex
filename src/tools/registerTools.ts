@@ -511,7 +511,25 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     await assertGitWorkspace(workspacePath);
     const placeholder = runStore.createRun({ projectId: project.id, workspacePath, status: "queued", autonomy, prompt: args.instruction, command: "codex-app-thread project continue pending", metadata: { projectId: project.id, executionMode, codexThreadId: threadId, baselineGitStatus: await gitStatusText(workspacePath) } });
     const prompt = compileProjectCodexPrompt({ project, runId: placeholder.id, workspacePath, userGoal: args.instruction, executionMode, autonomy, codexThreadId: threadId });
-    const response = await continueCodexAppThreadWs({ threadId, workspacePath, instruction: prompt, config: appServerConfig });
+    let response: Awaited<ReturnType<typeof continueCodexAppThreadWs>>;
+    try {
+      response = await continueCodexAppThreadWs({ threadId, workspacePath, instruction: prompt, config: appServerConfig });
+    } catch (error) {
+      runStore.updateRun(placeholder.id, {
+        status: "failed",
+        prompt,
+        codexCommand: "codex-app-thread project continue",
+        metadata: {
+          ...placeholder.metadata,
+          projectId: project.id,
+          executionMode,
+          codexThreadId: threadId,
+          ...partialAppThreadMetadata(error),
+        },
+      });
+      rememberProjectThread(project.id, partialThreadIdFromError(error) ?? threadId, args.setDefaultThread ?? true);
+      throw error;
+    }
     const normalized = normalizeAppThreadResponse(response);
     const nextThreadId = normalized.threadId ?? threadId;
     const run = runStore.updateRun(placeholder.id, { status: appThreadRunStatus(normalized.status), prompt, codexCommand: "codex-app-thread project continue", metadata: { ...placeholder.metadata, projectId: project.id, executionMode, codexThreadId: nextThreadId, parentRunId: runStore.listRuns(project.path).find((candidate) => candidate.metadata?.codexThreadId === threadId)?.id, appServerResponse: response, appServerEvents: normalized.events, appServerSummary: normalized.summary, summary: normalized.summary } });
