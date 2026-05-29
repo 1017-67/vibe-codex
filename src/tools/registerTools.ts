@@ -122,6 +122,23 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     return "running";
   }
 
+  function partialThreadIdFromError(error: unknown): string | undefined {
+    if (!(error instanceof VibeError)) return undefined;
+    const threadId = error.details.codexThreadId ?? error.details.threadId;
+    return typeof threadId === "string" ? threadId : undefined;
+  }
+
+  function partialAppThreadMetadata(error: unknown): Record<string, unknown> {
+    if (!(error instanceof VibeError)) return {};
+    return {
+      codexThreadId: partialThreadIdFromError(error),
+      appServerResponse: error.details.threadResponse,
+      appServerEvents: error.details.events,
+      appServerError: { code: error.code, message: error.message, details: error.details },
+      turnStartFailed: error.details.turnStartFailed === true,
+    };
+  }
+
   function normalizeAppThreadResponse(response: unknown): {
     threadId?: string;
     status?: string;
@@ -408,11 +425,29 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       });
       const sourceThreadId = args.codexThreadId ?? project.defaultCodexThreadId;
       const prompt = compileProjectCodexPrompt({ project, runId: placeholder.id, workspacePath, userGoal: args.userGoal, executionMode, autonomy, codexThreadId: sourceThreadId, context: args.context, constraints: args.constraints, acceptanceCriteria: args.acceptanceCriteria, verification: args.verification });
-      const response = sourceThreadId && args.forkThread
-        ? await forkCodexAppThreadWs({ threadId: sourceThreadId, workspacePath, instruction: prompt, config: appServerConfig })
-        : sourceThreadId
-          ? await continueCodexAppThreadWs({ threadId: sourceThreadId, workspacePath, instruction: prompt, config: appServerConfig })
-          : await startCodexAppThreadWs({ workspacePath, prompt, config: appServerConfig });
+      let response: unknown;
+      try {
+        response = sourceThreadId && args.forkThread
+          ? await forkCodexAppThreadWs({ threadId: sourceThreadId, workspacePath, instruction: prompt, config: appServerConfig })
+          : sourceThreadId
+            ? await continueCodexAppThreadWs({ threadId: sourceThreadId, workspacePath, instruction: prompt, config: appServerConfig })
+            : await startCodexAppThreadWs({ workspacePath, prompt, config: appServerConfig });
+      } catch (error) {
+        const partialThreadId = partialThreadIdFromError(error);
+        runStore.updateRun(placeholder.id, {
+          status: "failed",
+          prompt,
+          codexCommand: "codex-app-thread project",
+          metadata: {
+            ...placeholder.metadata,
+            projectId: project.id,
+            executionMode,
+            ...partialAppThreadMetadata(error),
+          },
+        });
+        rememberProjectThread(project.id, partialThreadId, args.setDefaultThread ?? true);
+        throw error;
+      }
       const normalized = normalizeAppThreadResponse(response);
       const threadId = normalized.threadId ?? sourceThreadId;
       const run = runStore.updateRun(placeholder.id, {
@@ -690,11 +725,33 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
         autonomy,
       });
       if (approval) return approval;
-      const response = args.codexThreadId && args.forkThread
-        ? await forkCodexAppThreadWs({ threadId: args.codexThreadId, workspacePath, instruction: prompt, config: appServerConfig })
-        : args.codexThreadId && args.continueExistingThread
-          ? await resumeCodexAppThreadWs({ threadId: args.codexThreadId, workspacePath, prompt, config: appServerConfig })
-          : await startCodexAppThreadWs({ workspacePath, prompt, config: appServerConfig });
+      let response: unknown;
+      try {
+        response = args.codexThreadId && args.forkThread
+          ? await forkCodexAppThreadWs({ threadId: args.codexThreadId, workspacePath, instruction: prompt, config: appServerConfig })
+          : args.codexThreadId && args.continueExistingThread
+            ? await resumeCodexAppThreadWs({ threadId: args.codexThreadId, workspacePath, prompt, config: appServerConfig })
+            : await startCodexAppThreadWs({ workspacePath, prompt, config: appServerConfig });
+      } catch (error) {
+        const partialThreadId = partialThreadIdFromError(error);
+        if (partialThreadId) {
+          runStore.createRun({
+            workspacePath,
+            status: "failed",
+            autonomy,
+            prompt,
+            command: "codex-app-thread",
+            metadata: {
+              executionMode,
+              previousCodexThreadId: args.codexThreadId,
+              forkThread: args.forkThread === true,
+              continueExistingThread: args.continueExistingThread === true,
+              ...partialAppThreadMetadata(error),
+            },
+          });
+        }
+        throw error;
+      }
       const normalized = normalizeAppThreadResponse(response);
       const threadId = normalized.threadId ?? args.codexThreadId;
       const run = runStore.createRun({
@@ -870,7 +927,23 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     await assertGitWorkspace(workspacePath);
     const prompt = compileCodexPrompt({ workspacePath, userGoal: args.userGoal, autonomy });
     const status = await ensureCodexAppServer(config);
-    const response = await startCodexAppThreadWs({ workspacePath, prompt, config: configWithManagedAppServerUrl(config, status) });
+    let response: unknown;
+    try {
+      response = await startCodexAppThreadWs({ workspacePath, prompt, config: configWithManagedAppServerUrl(config, status) });
+    } catch (error) {
+      const partialThreadId = partialThreadIdFromError(error);
+      if (partialThreadId) {
+        runStore.createRun({
+          workspacePath,
+          status: "failed",
+          autonomy,
+          prompt,
+          command: "codex-app-thread",
+          metadata: { executionMode: "codex-app-thread", ...partialAppThreadMetadata(error) },
+        });
+      }
+      throw error;
+    }
     const normalized = normalizeAppThreadResponse(response);
     const run = runStore.createRun({ workspacePath, status: appThreadRunStatus(normalized.status), autonomy, prompt, command: "codex-app-thread", metadata: { executionMode: "codex-app-thread", codexThreadId: normalized.threadId, appServerResponse: response, appServerEvents: normalized.events, appServerSummary: normalized.summary } });
     return { ...appThreadOutput({ runId: run.id, workspacePath, response, fallbackThreadId: normalized.threadId }), appServer: status };

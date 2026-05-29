@@ -66,6 +66,21 @@ function extractTurnId(response: unknown): string | undefined {
   return undefined;
 }
 
+function turnStartError(error: unknown, args: { threadId: string; threadResponse: unknown; events: CodexAppServerWsEvent[] }): VibeError {
+  const details = {
+    ...(error instanceof VibeError ? error.details : {}),
+    codexThreadId: args.threadId,
+    threadId: args.threadId,
+    threadResponse: args.threadResponse,
+    events: args.events,
+    turnStartFailed: true,
+  };
+  if (error instanceof VibeError) {
+    return new VibeError(error.code, error.message, details);
+  }
+  return new VibeError("CODEX_APP_SERVER_UNAVAILABLE", error instanceof Error ? error.message : String(error), details);
+}
+
 export class CodexAppServerWsClient {
   private readonly url: string;
   private readonly timeoutMs: number;
@@ -240,7 +255,12 @@ export async function startCodexAppThreadWs(args: { workspacePath: string; promp
       const threadResponse = await client.request("thread/start", threadStartParams(args));
       const threadId = extractThreadId(threadResponse);
       if (!threadId) throw new VibeError("CODEX_APP_SERVER_UNAVAILABLE", "thread/start response did not include a thread id.", { threadResponse, events: client.recentEvents() });
-      const turnResponse = await client.request("turn/start", turnStartParams({ ...args, threadId }));
+      let turnResponse: unknown;
+      try {
+        turnResponse = await client.request("turn/start", turnStartParams({ ...args, threadId }));
+      } catch (error) {
+        throw turnStartError(error, { threadId, threadResponse, events: client.recentEvents() });
+      }
       return { threadId, turnId: extractTurnId(turnResponse), threadResponse, turnResponse, events: client.recentEvents() } satisfies CodexThreadTurnResult;
     },
   });
@@ -265,7 +285,11 @@ export async function resumeCodexAppThreadWs(args: { threadId: string; workspace
       const threadId = extractThreadId(threadResponse) ?? args.threadId;
       let turnResponse: unknown;
       if (args.prompt) {
-        turnResponse = await client.request("turn/start", turnStartParams({ threadId, workspacePath: args.workspacePath, prompt: args.prompt, config: args.config }));
+        try {
+          turnResponse = await client.request("turn/start", turnStartParams({ threadId, workspacePath: args.workspacePath, prompt: args.prompt, config: args.config }));
+        } catch (error) {
+          throw turnStartError(error, { threadId, threadResponse, events: client.recentEvents() });
+        }
       }
       return { threadId, turnId: extractTurnId(turnResponse), threadResponse, turnResponse, events: client.recentEvents() } satisfies CodexThreadTurnResult;
     },
@@ -297,7 +321,11 @@ export async function forkCodexAppThreadWs(args: { threadId: string; workspacePa
       if (!threadId) throw new VibeError("CODEX_APP_SERVER_UNAVAILABLE", "thread/fork response did not include a thread id.", { threadResponse, events: client.recentEvents() });
       let turnResponse: unknown;
       if (args.instruction) {
-        turnResponse = await client.request("turn/start", turnStartParams({ threadId, workspacePath: args.workspacePath, prompt: args.instruction, config: args.config }));
+        try {
+          turnResponse = await client.request("turn/start", turnStartParams({ threadId, workspacePath: args.workspacePath, prompt: args.instruction, config: args.config }));
+        } catch (error) {
+          throw turnStartError(error, { threadId, threadResponse, events: client.recentEvents() });
+        }
       }
       return { threadId, turnId: extractTurnId(turnResponse), threadResponse, turnResponse, events: client.recentEvents() } satisfies CodexThreadTurnResult;
     },

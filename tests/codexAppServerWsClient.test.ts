@@ -79,6 +79,29 @@ describe("Codex app-server WebSocket client", () => {
     });
   });
 
+  it("preserves the created thread id when turn/start fails", async () => {
+    const ctx = await tempConfig();
+    try {
+      await withFakeWsServer((request, send) => {
+        if (request.method === "initialize") return send({ jsonrpc: "2.0", id: request.id, result: { ok: true } });
+        if (request.method === "thread/start") return send({ jsonrpc: "2.0", id: request.id, result: { thread: { id: "thread-created", status: { type: "idle" } } } });
+        if (request.method === "turn/start") return send({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: "turn rejected" } });
+      }, async (url) => {
+        ctx.config.codexAppServerUrl = url;
+        await expect(startCodexAppThreadWs({ workspacePath: ctx.root, prompt: "start prompt", config: ctx.config })).rejects.toMatchObject({
+          code: "CODEX_APP_SERVER_UNAVAILABLE",
+          details: {
+            codexThreadId: "thread-created",
+            threadId: "thread-created",
+            turnStartFailed: true,
+          },
+        });
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("sends thread start, resume, fork, status, and turn prompt shapes", async () => {
     const ctx = await tempConfig();
     try {
