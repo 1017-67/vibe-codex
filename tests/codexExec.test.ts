@@ -112,6 +112,9 @@ describe("Codex exec integration", () => {
     expect(run.metadata?.terminalApp).toBe("ghostty");
     expect(run.metadata?.promptSubmittedAutomatically).toBe(true);
     expect(run.metadata?.launchedCodexDirectly).toBe(true);
+    expect(run.metadata?.usesCodexExec).toBe(false);
+    expect(run.metadata?.usesShellScript).toBe(false);
+    expect(run.metadata?.requiresManualPaste).toBe(false);
     expect(run.metadata?.copiedToClipboard).toBe(false);
     expect(run.metadata?.scriptPath).toBeUndefined();
     expect(run.metadata?.logPath).toBeUndefined();
@@ -231,6 +234,9 @@ describe("Codex exec integration", () => {
     });
     expect(run.status).toBe("running_visible");
     expect(run.codexCommand).toBe("app-supervised prompt handoff");
+    expect(run.metadata?.promptSubmittedAutomatically).toBe(false);
+    expect(run.metadata?.requiresManualPaste).toBe(true);
+    expect(run.metadata?.usesCodexExec).toBe(false);
     await expect(fs.readFile(run.metadata!.promptPath as string, "utf8")).resolves.toBe("Paste this into the app");
     await expect(fs.readFile(run.metadata!.metadataPath as string, "utf8")).resolves.toContain("\"executionMode\": \"app-supervised\"");
     await expect(fs.readFile(run.metadata!.baselineStatusPath as string, "utf8")).resolves.toBe("");
@@ -259,6 +265,9 @@ describe("Codex exec integration", () => {
       expect(run.status).toBe("app_visible_ready");
       expect(run.codexCommand).toBe("codex app visible prompt handoff");
       expect(run.metadata?.executionMode).toBe("codex-app-visible");
+      expect(run.metadata?.promptSubmittedAutomatically).toBe(false);
+      expect(run.metadata?.requiresManualPaste).toBe(true);
+      expect(run.metadata?.usesCodexExec).toBe(false);
       expect(run.metadata?.appOpened).toBe(true);
       expect(run.metadata?.copiedToClipboard).toBe(true);
       expect(run.metadata?.clipboardCopied).toBe(true);

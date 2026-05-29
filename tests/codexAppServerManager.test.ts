@@ -17,23 +17,28 @@ async function writeFakeCodexBin(root: string) {
   const file = path.join(root, "fake-codex");
   await fs.writeFile(file, `#!/usr/bin/env node
 const http = require("node:http");
+const { createRequire } = require("node:module");
+const requireFromCwd = createRequire(process.cwd() + "/package.json");
+const { WebSocketServer } = requireFromCwd("ws");
 const listenArg = process.argv[process.argv.indexOf("--listen") + 1];
 const url = new URL(listenArg);
-const server = http.createServer(async (req, res) => {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  const text = Buffer.concat(chunks).toString("utf8");
-  const body = text ? JSON.parse(text) : undefined;
+const server = http.createServer((req, res) => {
   const send = (payload) => {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify(payload));
   };
-  if (req.method === "GET" && req.url === "/health") return send({ status: "ok" });
-  if (req.method === "POST" && req.url === "/threads") return send({ threadId: "fake-thread", status: "running", body });
-  return send({ ok: true, url: req.url, body });
+  if (req.method === "GET" && (req.url === "/healthz" || req.url === "/readyz")) return send({ status: "ok" });
+  return send({ ok: true, url: req.url });
+});
+const wss = new WebSocketServer({ server });
+wss.on("connection", (socket) => {
+  socket.on("message", (data) => {
+    const request = JSON.parse(data.toString("utf8"));
+    if (request.id) socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { ok: true } }));
+  });
 });
 server.listen(Number(url.port), url.hostname);
-process.on("SIGTERM", () => server.close(() => process.exit(0)));
+process.on("SIGTERM", () => wss.close(() => server.close(() => process.exit(0))));
 `);
   await fs.chmod(file, 0o755);
   return file;
@@ -63,7 +68,7 @@ describe("Codex app-server manager", () => {
       const status = await startManagedCodexAppServer(ctx.config);
       expect(status.available).toBe(true);
       expect(status.startedByVibeCodex).toBe(true);
-      expect(status.url).toBe(`http://127.0.0.1:${ctx.config.codexAppServerPort}`);
+      expect(status.url).toBe(`ws://127.0.0.1:${ctx.config.codexAppServerPort}`);
       expect(status.pid).toBeGreaterThan(0);
       const stopped = await stopManagedCodexAppServer(ctx.config);
       expect(stopped.available).toBe(false);

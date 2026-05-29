@@ -68,5 +68,6 @@ describe("project registry", () => {
     expect(prompt).toContain("executionMode: codex-app-thread");
     expect(prompt).toContain("codexThreadId: thread-1");
     expect(prompt).toContain("Expected report fields:");
+    expect(prompt).toContain("use `rg --files` or `find .`, not `find ..`");
   });
 });

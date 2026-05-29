@@ -524,6 +524,9 @@ export async function startGhosttyInteractiveCodexTask(args: {
       terminalFallbackUsed: launch.fallbackUsed,
       launchedCodexDirectly: launch.launchedCodexDirectly,
       promptSubmittedAutomatically: launch.launchedCodexDirectly,
+      usesCodexExec: false,
+      usesShellScript: false,
+      requiresManualPaste: false,
       runDir,
       promptPath,
       baselineStatusPath,
@@ -581,6 +584,10 @@ export async function startCodexAppVisibleTask(args: {
       clipboardCopied: copyResult ? copyResult.copied === true : false,
       clipboardExitCode: copyResult?.exitCode,
       clipboardVerified: copyResult?.verified === true,
+      promptSubmittedAutomatically: false,
+      usesCodexExec: false,
+      usesShellScript: false,
+      requiresManualPaste: true,
     },
   });
 }

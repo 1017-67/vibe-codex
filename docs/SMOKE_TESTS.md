@@ -61,7 +61,7 @@ Call `relay_health`, then `connector_setup_status`.
 
 1. Call `create_workspace` with `initGit: true`.
 2. Call `start_codex_task` with default `executionMode` (`codex-app-visible` when `DEFAULT_VISIBLE_MODE=codex-app-visible`) and a task that creates one file.
-3. Confirm the tool returns `status: "app_visible_ready"`, `executionMode: "codex-app-visible"`, `promptPath`, `rootPromptPath`, `copiedToClipboard`, and `clipboardVerified`.
+3. Confirm the tool returns `status: "app_visible_ready"`, `executionMode: "codex-app-visible"`, `promptPath`, `rootPromptPath`, `copiedToClipboard`, `clipboardVerified`, `promptSubmittedAutomatically: false`, and `requiresManualPaste: true`.
 4. Watch Codex Desktop open with `codex app <workspace>`.
 5. Confirm no generated `run-codex.sh`, `codex.log`, hidden exec, Ghostty, GUI typing, AppleScript, accessibility automation, or `codex exec` is used for `codex-app-visible`.
 6. Paste/send the copied clipboard prompt manually in the Codex Desktop GUI. If the app shows `AGENTS.md`, ignore it and paste the clipboard contents, or open `VIBE_CODEX_PROMPT.md` / the returned `promptPath`.
@@ -78,7 +78,7 @@ Call `relay_health`, then `connector_setup_status`.
 ## Ghostty Visible Fallback
 
 1. Call `start_codex_task` with `executionMode: "ghostty-visible"` and a task that creates one file.
-2. Confirm the tool returns `status: "interactive_started"`, `promptPath`, and `promptSubmittedAutomatically: true`.
+2. Confirm the tool returns `status: "interactive_started"`, `promptPath`, `promptSubmittedAutomatically: true`, `launchedCodexDirectly: true`, `usesCodexExec: false`, `usesShellScript: false`, and `requiresManualPaste: false`.
 3. Watch Ghostty open normal interactive `codex` with the prompt already submitted.
 4. Confirm no generated `run-codex.sh`, `codex.log`, hidden exec, shell pipe, GUI typing, or `codex exec` is used for `ghostty-visible`.
 5. Let Codex create the requested file, then call `collect_visible_run_result`.
@@ -114,11 +114,13 @@ Call `relay_health`, then `connector_setup_status`.
 4. Call `resume_project`; confirm the same workspace is returned and no new folder is created.
 5. Call `start_project_task` with a harmless inspection prompt and `executionMode: "codex-app-thread"`.
 6. If `CODEX_APP_SERVER_MODE=auto`, confirm Vibe Codex detects or starts the app-server; no `CODEX_APP_SERVER_URL` should be required.
-7. If app-server startup fails, confirm the tool returns `CODEX_APP_SERVER_UNAVAILABLE` with fallback modes including `codex-app-visible` and `ghostty-visible`.
-8. If app-server is available, confirm the tool returns `noPaste: true`, a `threadId`, `runId`, `projectId`, app-server status, and a prompt containing `Source: ChatGPT via Vibe Codex`.
+7. If app-server startup fails, confirm the tool returns `CODEX_APP_SERVER_UNAVAILABLE` and recommends `ghostty-visible`.
+8. If app-server is available, confirm the tool returns `noPaste: true`, `promptSubmittedAutomatically: true`, `requiresManualPaste: false`, a `threadId`, `runId`, `projectId`, app-server status, and a prompt containing `Source: ChatGPT via Vibe Codex`.
 9. Call `continue_project_task`; confirm it reuses the project's default thread when one was stored.
 10. Call `list_project_runs`, `list_project_threads`, and `collect_project_result`; confirm run metadata links the same `projectId`, `workspacePath`, `runId`, and `threadId`.
 11. Confirm no new workspace was created during `start_project_task` or `continue_project_task`.
+12. Confirm the app-thread path used WebSocket JSON-RPC app-server calls such as `thread/start`, `thread/resume`, and `turn/start`, not HTTP `/threads`.
+13. Confirm the prompt tells Codex to use `rg --files` or `find .`, not `find ..`, so file discovery stays inside the workspace root.
 
 ## Legacy Terminal Visible Run
 

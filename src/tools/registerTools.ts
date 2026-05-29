@@ -16,8 +16,8 @@ import { openCodexApp } from "../codex/codexApp.js";
 import { compileCodexPrompt } from "../codex/promptCompiler.js";
 import { compileProjectCodexPrompt } from "../codex/projectPrompt.js";
 import { collectVisibleRunResult, continueCodexTask, ExecutionMode, startAppSupervisedCodexTask, startCodexAppVisibleTask, startCodexExecTask, startGhosttyInteractiveCodexTask, startTerminalVisibleCodexTask } from "../codex/codexExec.js";
-import { continueCodexAppThread, detectCodexAppServer, forkCodexAppThread, getCodexAppThreadStatus, listCodexThreads, normalizeCodexAppThreadResponse, resumeCodexAppThread, startCodexAppThread } from "../codex/codexAppServer.js";
 import { configWithManagedAppServerUrl, detectManagedCodexAppServer, ensureCodexAppServer, restartManagedCodexAppServer, startManagedCodexAppServer, stopManagedCodexAppServer } from "../codex/codexAppServerManager.js";
+import { continueCodexAppThreadWs, forkCodexAppThreadWs, getCodexAppThreadStatusWs, listCodexThreadsWs, resumeCodexAppThreadWs, startCodexAppThreadWs } from "../codex/codexAppServerWsClient.js";
 import { RunStore } from "../runs/runStore.js";
 import { VibeError, toErrorPayload } from "../util/errors.js";
 import { assertSafeWorkspacePath } from "../safety/paths.js";
@@ -88,7 +88,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     fallbackThreadId?: string;
     sourceThreadId?: string;
   }) {
-    const normalized = normalizeCodexAppThreadResponse(args.response);
+    const normalized = normalizeAppThreadResponse(args.response);
     const threadId = normalized.threadId ?? args.fallbackThreadId;
     return {
       runId: args.runId,
@@ -100,6 +100,10 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       summary: normalized.summary,
       appServerEvents: normalized.events,
       appServerResponse: args.response,
+      promptSubmittedAutomatically: true,
+      usesCodexExec: false,
+      usesShellScript: false,
+      requiresManualPaste: false,
       experimental: true,
       doNotFallbackToDirectWrite: true,
     };
@@ -107,7 +111,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
 
   function appServerFallbackDetails(details: unknown) {
     const record = typeof details === "object" && details !== null ? details as Record<string, unknown> : {};
-    return { recommendedExecutionMode: "codex-app-visible", fallbackExecutionModes: ["codex-app-visible", "ghostty-visible"], ...record };
+    return { recommendedExecutionMode: "ghostty-visible", fallbackExecutionModes: ["ghostty-visible", "codex-app-visible", "app-supervised"], ...record };
   }
 
   function appThreadRunStatus(status: string | undefined) {
@@ -115,6 +119,39 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     if (normalized === "failed" || normalized === "error" || normalized === "cancelled" || normalized === "canceled") return "failed";
     if (normalized === "completed" || normalized === "complete" || normalized === "done" || normalized === "succeeded" || normalized === "success") return "completed";
     return "running";
+  }
+
+  function normalizeAppThreadResponse(response: unknown): {
+    threadId?: string;
+    status?: string;
+    summary?: string;
+    events?: unknown[];
+  } {
+    if (typeof response !== "object" || response === null) return {};
+    const record = response as Record<string, unknown>;
+    const threadResponse = typeof record.threadResponse === "object" && record.threadResponse !== null ? record.threadResponse as Record<string, unknown> : undefined;
+    const turnResponse = typeof record.turnResponse === "object" && record.turnResponse !== null ? record.turnResponse as Record<string, unknown> : undefined;
+    const thread = typeof threadResponse?.thread === "object" && threadResponse.thread !== null
+      ? threadResponse.thread as Record<string, unknown>
+      : typeof record.thread === "object" && record.thread !== null
+        ? record.thread as Record<string, unknown>
+        : undefined;
+    const turn = typeof turnResponse?.turn === "object" && turnResponse.turn !== null ? turnResponse.turn as Record<string, unknown> : undefined;
+    const status = typeof turn?.status === "string"
+      ? turn.status
+      : typeof thread?.status === "string"
+        ? thread.status
+        : typeof (thread?.status as Record<string, unknown> | undefined)?.type === "string"
+          ? (thread?.status as Record<string, unknown>).type as string
+          : typeof record.status === "string"
+            ? record.status
+            : undefined;
+    return {
+      threadId: typeof record.threadId === "string" ? record.threadId : typeof thread?.id === "string" ? thread.id : undefined,
+      status,
+      summary: typeof record.summary === "string" ? record.summary : undefined,
+      events: Array.isArray(record.events) ? record.events : [],
+    };
   }
 
   async function resolveProject(projectRef: string) {
@@ -150,8 +187,8 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     const detection = await detectManagedCodexAppServer(config);
     return new VibeError("CODEX_APP_SERVER_UNAVAILABLE", detection.lastError ?? "Codex app-server is unavailable. Use app-supervised/codex-app-visible for manual GUI fallback or ghostty-visible for terminal automatic submission.", {
       ...appServerFallbackDetails({ status: detection }),
-      recommendedExecutionMode: "codex-app-thread",
-      fallbackExecutionModes: ["app-supervised", "codex-app-visible", "ghostty-visible"],
+      recommendedExecutionMode: "ghostty-visible",
+      fallbackExecutionModes: ["ghostty-visible", "codex-app-visible", "app-supervised"],
       noPasteRequires: "A healthy local Codex app-server managed by Vibe Codex or configured with CODEX_APP_SERVER_URL",
     });
   }
@@ -368,14 +405,15 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
         command: "codex-app-thread project pending",
         metadata: { projectId: project.id, executionMode, codexThreadId: args.codexThreadId, baselineGitStatus: await gitStatusText(workspacePath) },
       });
-      const prompt = compileProjectCodexPrompt({ project, runId: placeholder.id, workspacePath, userGoal: args.userGoal, executionMode, autonomy, codexThreadId: args.codexThreadId, context: args.context, constraints: args.constraints, acceptanceCriteria: args.acceptanceCriteria, verification: args.verification });
-      const response = args.codexThreadId && args.forkThread
-        ? await forkCodexAppThread({ threadId: args.codexThreadId, workspacePath, instruction: prompt, config: appServerConfig })
-        : args.codexThreadId
-          ? await resumeCodexAppThread({ threadId: args.codexThreadId, workspacePath, prompt, config: appServerConfig })
-          : await startCodexAppThread({ workspacePath, prompt, config: appServerConfig });
-      const normalized = normalizeCodexAppThreadResponse(response);
-      const threadId = normalized.threadId ?? args.codexThreadId;
+      const sourceThreadId = args.codexThreadId ?? project.defaultCodexThreadId;
+      const prompt = compileProjectCodexPrompt({ project, runId: placeholder.id, workspacePath, userGoal: args.userGoal, executionMode, autonomy, codexThreadId: sourceThreadId, context: args.context, constraints: args.constraints, acceptanceCriteria: args.acceptanceCriteria, verification: args.verification });
+      const response = sourceThreadId && args.forkThread
+        ? await forkCodexAppThreadWs({ threadId: sourceThreadId, workspacePath, instruction: prompt, config: appServerConfig })
+        : sourceThreadId
+          ? await continueCodexAppThreadWs({ threadId: sourceThreadId, workspacePath, instruction: prompt, config: appServerConfig })
+          : await startCodexAppThreadWs({ workspacePath, prompt, config: appServerConfig });
+      const normalized = normalizeAppThreadResponse(response);
+      const threadId = normalized.threadId ?? sourceThreadId;
       const run = runStore.updateRun(placeholder.id, {
         status: appThreadRunStatus(normalized.status),
         prompt,
@@ -392,7 +430,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
         },
       });
       const updatedProject = rememberProjectThread(project.id, threadId, args.setDefaultThread ?? true);
-      return { ...appThreadOutput({ runId: run.id, workspacePath, response, fallbackThreadId: threadId, sourceThreadId: args.forkThread ? args.codexThreadId : undefined }), project: updatedProject, executionMode, appServer: detection, noPaste: true, createdWorkspace: false };
+      return { ...appThreadOutput({ runId: run.id, workspacePath, response, fallbackThreadId: threadId, sourceThreadId: args.forkThread ? sourceThreadId : undefined }), project: updatedProject, executionMode, appServer: detection, noPaste: true, createdWorkspace: false };
     }
     if (executionMode === "ghostty-visible") {
       const promptRunId = randomUUID();
@@ -400,7 +438,22 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       const run = await startGhosttyInteractiveCodexTask({ workspacePath, prompt, autonomy, config, runStore });
       runStore.updateRun(run.id, { metadata: { ...(run.metadata ?? {}), projectId: project.id, executionMode, baselineGitStatus: await gitStatusText(workspacePath) } });
       runStore.touchProject(project.id);
-      return { runId: run.id, projectId: project.id, status: run.status, executionMode, workspacePath, promptPath: run.metadata?.promptPath, createdWorkspace: false, noPaste: true, terminalApp: run.metadata?.terminalApp };
+      return {
+        runId: run.id,
+        projectId: project.id,
+        status: run.status,
+        executionMode,
+        workspacePath,
+        promptPath: run.metadata?.promptPath,
+        createdWorkspace: false,
+        noPaste: true,
+        terminalApp: run.metadata?.terminalApp,
+        launchedCodexDirectly: run.metadata?.launchedCodexDirectly === true,
+        promptSubmittedAutomatically: run.metadata?.promptSubmittedAutomatically === true,
+        usesCodexExec: false,
+        usesShellScript: false,
+        requiresManualPaste: false,
+      };
     }
     throw new VibeError("CODEX_APP_SERVER_UNAVAILABLE", "codex-app-visible/app-supervised is manual paste fallback. Use start_codex_task or select ghostty-visible when app-server is unavailable.", { recommendedExecutionMode: "codex-app-thread", fallbackExecutionModes: ["app-supervised", "codex-app-visible", "ghostty-visible"] });
   }));
@@ -422,8 +475,8 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     await assertGitWorkspace(workspacePath);
     const placeholder = runStore.createRun({ projectId: project.id, workspacePath, status: "queued", autonomy, prompt: args.instruction, command: "codex-app-thread project continue pending", metadata: { projectId: project.id, executionMode, codexThreadId: threadId, baselineGitStatus: await gitStatusText(workspacePath) } });
     const prompt = compileProjectCodexPrompt({ project, runId: placeholder.id, workspacePath, userGoal: args.instruction, executionMode, autonomy, codexThreadId: threadId });
-    const response = await continueCodexAppThread({ threadId, instruction: prompt, config: appServerConfig });
-    const normalized = normalizeCodexAppThreadResponse(response);
+    const response = await continueCodexAppThreadWs({ threadId, workspacePath, instruction: prompt, config: appServerConfig });
+    const normalized = normalizeAppThreadResponse(response);
     const nextThreadId = normalized.threadId ?? threadId;
     const run = runStore.updateRun(placeholder.id, { status: appThreadRunStatus(normalized.status), prompt, codexCommand: "codex-app-thread project continue", metadata: { ...placeholder.metadata, projectId: project.id, executionMode, codexThreadId: nextThreadId, parentRunId: runStore.listRuns(project.path).find((candidate) => candidate.metadata?.codexThreadId === threadId)?.id, appServerResponse: response, appServerEvents: normalized.events, appServerSummary: normalized.summary, summary: normalized.summary } });
     const updatedProject = rememberProjectThread(project.id, nextThreadId, args.setDefaultThread ?? true);
@@ -581,6 +634,9 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
         copiedToClipboard: run.metadata?.copiedToClipboard === true,
         launchedCodexDirectly: run.metadata?.launchedCodexDirectly === true,
         promptSubmittedAutomatically: run.metadata?.promptSubmittedAutomatically === true,
+        usesCodexExec: false,
+        usesShellScript: false,
+        requiresManualPaste: false,
         requiresVisibleSupervision: true,
         doNotFallbackToDirectWrite: true,
         message: run.metadata?.launchedCodexDirectly === true
@@ -634,11 +690,11 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       });
       if (approval) return approval;
       const response = args.codexThreadId && args.forkThread
-        ? await forkCodexAppThread({ threadId: args.codexThreadId, workspacePath, instruction: prompt, config: appServerConfig })
+        ? await forkCodexAppThreadWs({ threadId: args.codexThreadId, workspacePath, instruction: prompt, config: appServerConfig })
         : args.codexThreadId && args.continueExistingThread
-          ? await resumeCodexAppThread({ threadId: args.codexThreadId, workspacePath, prompt, config: appServerConfig })
-          : await startCodexAppThread({ workspacePath, prompt, config: appServerConfig });
-      const normalized = normalizeCodexAppThreadResponse(response);
+          ? await resumeCodexAppThreadWs({ threadId: args.codexThreadId, workspacePath, prompt, config: appServerConfig })
+          : await startCodexAppThreadWs({ workspacePath, prompt, config: appServerConfig });
+      const normalized = normalizeAppThreadResponse(response);
       const threadId = normalized.threadId ?? args.codexThreadId;
       const run = runStore.createRun({
         workspacePath,
@@ -682,6 +738,10 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
         copiedToClipboard: run.metadata?.copiedToClipboard === true,
         clipboardVerified: run.metadata?.clipboardVerified === true,
         appOpened: run.metadata?.appOpened,
+        promptSubmittedAutomatically: false,
+        usesCodexExec: false,
+        usesShellScript: false,
+        requiresManualPaste: true,
         requiresVisibleSupervision: true,
         doNotFallbackToDirectWrite: true,
         message: "Codex Desktop opened; prompt copied and verified; paste/send the clipboard prompt in the GUI. If the app shows AGENTS.md, ignore it and paste the clipboard contents, or open VIBE_CODEX_PROMPT.md / the returned promptPath. No codex exec, Ghostty, shell script, GUI typing, AppleScript, or accessibility automation was used.",
@@ -708,6 +768,10 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
         metadataPath: run.metadata?.metadataPath,
         appOpened: run.metadata?.appOpened,
         clipboardCopied: run.metadata?.clipboardCopied,
+        promptSubmittedAutomatically: false,
+        usesCodexExec: false,
+        usesShellScript: false,
+        requiresManualPaste: true,
         requiresVisibleSupervision: true,
         doNotFallbackToDirectWrite: true,
         message: "Codex app has been opened. The prompt was copied to the clipboard if pbcopy was available; paste it into Codex app to run visibly.",
@@ -792,7 +856,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     inputSchema: z.object({}).optional(),
   }, async () => safeTool(async () => {
     const status = await ensureCodexAppServer(config);
-    return listCodexThreads(configWithManagedAppServerUrl(config, status));
+    return listCodexThreadsWs({ config: configWithManagedAppServerUrl(config, status) });
   }));
 
   server.registerTool("start_codex_app_thread", {
@@ -805,8 +869,8 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     await assertGitWorkspace(workspacePath);
     const prompt = compileCodexPrompt({ workspacePath, userGoal: args.userGoal, autonomy });
     const status = await ensureCodexAppServer(config);
-    const response = await startCodexAppThread({ workspacePath, prompt, config: configWithManagedAppServerUrl(config, status) });
-    const normalized = normalizeCodexAppThreadResponse(response);
+    const response = await startCodexAppThreadWs({ workspacePath, prompt, config: configWithManagedAppServerUrl(config, status) });
+    const normalized = normalizeAppThreadResponse(response);
     const run = runStore.createRun({ workspacePath, status: appThreadRunStatus(normalized.status), autonomy, prompt, command: "codex-app-thread", metadata: { executionMode: "codex-app-thread", codexThreadId: normalized.threadId, appServerResponse: response, appServerEvents: normalized.events, appServerSummary: normalized.summary } });
     return { ...appThreadOutput({ runId: run.id, workspacePath, response, fallbackThreadId: normalized.threadId }), appServer: status };
   }));
@@ -820,8 +884,8 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     const workspacePath = await assertSafeWorkspacePath(args.workspacePath, config);
     await assertGitWorkspace(workspacePath);
     const status = await ensureCodexAppServer(config);
-    const response = await resumeCodexAppThread({ threadId: args.threadId, workspacePath, prompt: args.prompt, config: configWithManagedAppServerUrl(config, status) });
-    const normalized = normalizeCodexAppThreadResponse(response);
+    const response = await resumeCodexAppThreadWs({ threadId: args.threadId, workspacePath, prompt: args.prompt, config: configWithManagedAppServerUrl(config, status) });
+    const normalized = normalizeAppThreadResponse(response);
     const threadId = normalized.threadId ?? args.threadId;
     const run = runStore.createRun({
       workspacePath,
@@ -849,8 +913,8 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     }
     await assertGitWorkspace(workspacePath);
     const status = await ensureCodexAppServer(config);
-    const response = await continueCodexAppThread({ threadId: args.threadId, instruction: args.instruction, config: configWithManagedAppServerUrl(config, status) });
-    const normalized = normalizeCodexAppThreadResponse(response);
+    const response = await continueCodexAppThreadWs({ threadId: args.threadId, instruction: args.instruction, workspacePath, config: configWithManagedAppServerUrl(config, status) });
+    const normalized = normalizeAppThreadResponse(response);
     const threadId = normalized.threadId ?? args.threadId;
     const run = runStore.createRun({
       workspacePath,
@@ -872,8 +936,8 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     const workspacePath = await assertSafeWorkspacePath(args.workspacePath, config);
     await assertGitWorkspace(workspacePath);
     const status = await ensureCodexAppServer(config);
-    const response = await forkCodexAppThread({ threadId: args.threadId, workspacePath, instruction: args.instruction, config: configWithManagedAppServerUrl(config, status) });
-    const normalized = normalizeCodexAppThreadResponse(response);
+    const response = await forkCodexAppThreadWs({ threadId: args.threadId, workspacePath, instruction: args.instruction, config: configWithManagedAppServerUrl(config, status) });
+    const normalized = normalizeAppThreadResponse(response);
     const nextThreadId = normalized.threadId;
     const run = runStore.createRun({
       workspacePath,
@@ -891,8 +955,8 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     inputSchema: z.object({ threadId: z.string() }),
   }, async (args) => safeTool(async () => {
     const status = await ensureCodexAppServer(config);
-    const response = await getCodexAppThreadStatus({ threadId: args.threadId, config: configWithManagedAppServerUrl(config, status) });
-    const normalized = normalizeCodexAppThreadResponse(response);
+    const response = await getCodexAppThreadStatusWs({ threadId: args.threadId, config: configWithManagedAppServerUrl(config, status) });
+    const normalized = normalizeAppThreadResponse(response);
     return {
       threadId: normalized.threadId ?? args.threadId,
       codexThreadId: normalized.threadId ?? args.threadId,

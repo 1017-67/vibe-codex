@@ -1,5 +1,6 @@
 import { AddressInfo } from "node:net";
 import { createServer as createNodeHttpServer } from "node:http";
+import { WebSocketServer } from "ws";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createMcpServer } from "../src/server/mcpServer.js";
 import { createHttpApp } from "../src/server/http.js";
@@ -46,6 +47,38 @@ async function initialize() {
   const text = await response.text();
   const sessionId = response.headers.get("mcp-session-id");
   return { response, text, sessionId, payload: parseMcpResponse(text) };
+}
+
+function createFakeWsAppServer(args?: { threadId?: string; forkThreadId?: string }) {
+  const requests: Array<{ method?: string; params?: any }> = [];
+  const threadId = args?.threadId ?? "thread-1";
+  const forkThreadId = args?.forkThreadId ?? "thread-2";
+  const httpServer = createNodeHttpServer((req, res) => {
+    if (req.method === "GET" && (req.url === "/healthz" || req.url === "/readyz" || req.url === "/health")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  const wsServer = new WebSocketServer({ server: httpServer });
+  wsServer.on("connection", (socket) => {
+    socket.on("message", (data) => {
+      const request = JSON.parse(data.toString("utf8"));
+      if (!request.id) return;
+      requests.push({ method: request.method, params: request.params });
+      const respond = (result: unknown) => socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+      if (request.method === "initialize") return respond({ protocolVersion: "0.1", serverInfo: { name: "fake-codex-app-server" } });
+      if (request.method === "thread/list") return respond({ threads: [{ id: threadId }] });
+      if (request.method === "thread/start") return respond({ thread: { id: threadId, status: { type: "running" } } });
+      if (request.method === "thread/resume") return respond({ thread: { id: request.params.threadId, status: { type: "running" } } });
+      if (request.method === "thread/fork") return respond({ thread: { id: forkThreadId, status: { type: "running" } } });
+      if (request.method === "thread/read") return respond({ thread: { id: request.params.threadId, status: { type: "running" } } });
+      if (request.method === "turn/start") return respond({ turn: { id: `turn-${requests.length}`, status: "running" } });
+      return socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "Method not found" } }));
+    });
+  });
+  return { httpServer, requests };
 }
 
 beforeEach(async () => {
@@ -296,6 +329,10 @@ describe("MCP Streamable HTTP sessions", () => {
       expect(result.metadataPath).toContain(".vibe-codex/runs/");
       expect(result.copiedToClipboard).toBe(true);
       expect(result.clipboardVerified).toBe(true);
+      expect(result.promptSubmittedAutomatically).toBe(false);
+      expect(result.requiresManualPaste).toBe(true);
+      expect(result.usesCodexExec).toBe(false);
+      expect(result.usesShellScript).toBe(false);
       expect(result.message).toContain("Codex Desktop opened");
       expect(result.message).toContain("AGENTS.md");
       expect(result.message).toContain("VIBE_CODEX_PROMPT.md");
@@ -325,30 +362,11 @@ describe("MCP Streamable HTTP sessions", () => {
   });
 
   it("app-thread tools create run mappings for start, continue, resume, and fork", async () => {
-    const requests: Array<{ method?: string; url?: string; body?: any }> = [];
-    const appServer = createNodeHttpServer(async (req, res) => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      const text = Buffer.concat(chunks).toString("utf8");
-      const body = text ? JSON.parse(text) : undefined;
-      requests.push({ method: req.method, url: req.url, body });
-      const send = (body: unknown) => {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(body));
-      };
-      if (req.method === "GET" && req.url === "/health") return send({ status: "ok" });
-      if (req.method === "GET" && req.url === "/threads") return send({ threads: [{ threadId: "thread-1" }] });
-      if (req.method === "POST" && req.url === "/threads") return send({ threadId: "thread-1", status: "running", summary: "started", events: [{ type: "thread.started" }] });
-      if (req.method === "POST" && req.url === "/threads/thread-1/messages") return send({ threadId: "thread-1", status: "running", summary: "continued", events: [{ type: "thread.message" }] });
-      if (req.method === "POST" && req.url === "/threads/thread-1/resume") return send({ threadId: "thread-1", status: "running", summary: "resumed", events: [{ type: "thread.resumed" }] });
-      if (req.method === "POST" && req.url === "/threads/thread-1/fork") return send({ threadId: "thread-2", status: "running", summary: "forked", events: [{ type: "thread.forked" }] });
-      if (req.method === "GET" && req.url === "/threads/thread-1") return send({ threadId: "thread-1", status: "running", summary: "status" });
-      res.writeHead(404).end();
-    });
-    await new Promise<void>((resolve) => appServer.listen(0, resolve));
+    const appServer = createFakeWsAppServer();
+    await new Promise<void>((resolve) => appServer.httpServer.listen(0, resolve));
     try {
-      const address = appServer.address() as AddressInfo;
-      ctx.config.codexAppServerUrl = `http://127.0.0.1:${address.port}`;
+      const address = appServer.httpServer.address() as AddressInfo;
+      ctx.config.codexAppServerUrl = `ws://127.0.0.1:${address.port}`;
       const workspace = `${ctx.root}/app-thread`;
       await import("node:fs/promises").then((fs) => fs.mkdir(workspace));
       await import("../src/util/spawn.js").then(({ runProcessArgv }) => runProcessArgv({ file: "git", args: ["init"], cwd: workspace }));
@@ -367,10 +385,10 @@ describe("MCP Streamable HTTP sessions", () => {
       expect(start.threadId).toBe("thread-1");
       expect(start.codexThreadId).toBe("thread-1");
       expect(start.status).toBe("running");
-      expect(start.summary).toBe("started");
-      expect(start.appServerEvents).toEqual([{ type: "thread.started" }]);
-      expect(requests.find((request) => request.method === "POST" && request.url === "/threads")?.body).toMatchObject({ workspacePath: resolvedWorkspace });
-      expect(requests.find((request) => request.method === "POST" && request.url === "/threads")?.body.prompt).toContain("Start thread");
+      expect(start.promptSubmittedAutomatically).toBe(true);
+      expect(start.requiresManualPaste).toBe(false);
+      expect(appServer.requests.find((request) => request.method === "thread/start")?.params).toMatchObject({ cwd: resolvedWorkspace });
+      expect(appServer.requests.find((request) => request.method === "turn/start")?.params.input[0].text).toContain("Start thread");
 
       const continueResponse = await postMcp({
         jsonrpc: "2.0",
@@ -382,9 +400,8 @@ describe("MCP Streamable HTTP sessions", () => {
       expect(continued.runId).toBeTruthy();
       expect(continued.threadId).toBe("thread-1");
       expect(continued.status).toBe("running");
-      expect(continued.summary).toBe("continued");
       expect(continued.workspacePath).toBe(resolvedWorkspace);
-      expect(requests.find((request) => request.method === "POST" && request.url === "/threads/thread-1/messages")?.body).toMatchObject({ threadId: "thread-1", instruction: "Continue thread" });
+      expect(appServer.requests.find((request) => request.method === "turn/start" && request.params.input?.[0]?.text === "Continue thread")?.params).toMatchObject({ threadId: "thread-1" });
 
       const resumeResponse = await postMcp({
         jsonrpc: "2.0",
@@ -396,8 +413,8 @@ describe("MCP Streamable HTTP sessions", () => {
       expect(resumed.runId).toBeTruthy();
       expect(resumed.threadId).toBe("thread-1");
       expect(resumed.status).toBe("running");
-      expect(resumed.summary).toBe("resumed");
-      expect(requests.find((request) => request.method === "POST" && request.url === "/threads/thread-1/resume")?.body).toMatchObject({ threadId: "thread-1", workspacePath: resolvedWorkspace, prompt: "Resume thread" });
+      expect(appServer.requests.find((request) => request.method === "thread/resume" && request.params.threadId === "thread-1")?.params).toMatchObject({ threadId: "thread-1", cwd: resolvedWorkspace });
+      expect(appServer.requests.find((request) => request.method === "turn/start" && request.params.input?.[0]?.text === "Resume thread")?.params.threadId).toBe("thread-1");
 
       const forkResponse = await postMcp({
         jsonrpc: "2.0",
@@ -410,8 +427,7 @@ describe("MCP Streamable HTTP sessions", () => {
       expect(forked.threadId).toBe("thread-2");
       expect(forked.codexThreadId).toBe("thread-2");
       expect(forked.sourceThreadId).toBe("thread-1");
-      expect(forked.summary).toBe("forked");
-      expect(requests.find((request) => request.method === "POST" && request.url === "/threads/thread-1/fork")?.body).toMatchObject({ threadId: "thread-1", workspacePath: resolvedWorkspace, instruction: "Fork thread" });
+      expect(appServer.requests.find((request) => request.method === "thread/fork")?.params).toMatchObject({ threadId: "thread-1", cwd: resolvedWorkspace });
 
       ctx.config.codexBin = "definitely-not-installed-codex";
       const startViaGenericResponse = await postMcp({
@@ -443,33 +459,18 @@ describe("MCP Streamable HTTP sessions", () => {
       const status = parseMcpResponse(await statusResponse.text()).result.structuredContent;
       expect(status.threadId).toBe("thread-1");
       expect(status.status).toBe("running");
-      expect(status.summary).toBe("status");
+      expect(appServer.requests.find((request) => request.method === "thread/read")?.params.threadId).toBe("thread-1");
     } finally {
-      await new Promise<void>((resolve) => appServer.close(() => resolve()));
+      await new Promise<void>((resolve) => appServer.httpServer.close(() => resolve()));
     }
   });
 
   it("project tools reuse registered workspaces and send no-paste app-thread prompts", async () => {
-    const requests: Array<{ method?: string; url?: string; body?: any }> = [];
-    const appServer = createNodeHttpServer(async (req, res) => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      const text = Buffer.concat(chunks).toString("utf8");
-      const body = text ? JSON.parse(text) : undefined;
-      requests.push({ method: req.method, url: req.url, body });
-      const send = (payload: unknown) => {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(payload));
-      };
-      if (req.method === "GET" && req.url === "/health") return send({ status: "ok" });
-      if (req.method === "POST" && req.url === "/threads") return send({ threadId: "project-thread-1", status: "running", summary: "started" });
-      if (req.method === "POST" && req.url === "/threads/project-thread-1/messages") return send({ threadId: "project-thread-1", status: "running", summary: "continued" });
-      res.writeHead(404).end();
-    });
-    await new Promise<void>((resolve) => appServer.listen(0, resolve));
+    const appServer = createFakeWsAppServer({ threadId: "project-thread-1" });
+    await new Promise<void>((resolve) => appServer.httpServer.listen(0, resolve));
     try {
-      const address = appServer.address() as AddressInfo;
-      ctx.config.codexAppServerUrl = `http://127.0.0.1:${address.port}`;
+      const address = appServer.httpServer.address() as AddressInfo;
+      ctx.config.codexAppServerUrl = `ws://127.0.0.1:${address.port}`;
       const workspace = `${ctx.root}/registered-project`;
       await import("node:fs/promises").then((fs) => fs.mkdir(workspace));
       await import("../src/util/spawn.js").then(({ runProcessArgv }) => runProcessArgv({ file: "git", args: ["init"], cwd: workspace }));
@@ -498,11 +499,12 @@ describe("MCP Streamable HTTP sessions", () => {
       expect(started.createdWorkspace).toBe(false);
       expect(started.noPaste).toBe(true);
       expect(started.threadId).toBe("project-thread-1");
-      const startBody = requests.find((request) => request.method === "POST" && request.url === "/threads")?.body;
-      expect(startBody.workspacePath).toBe(resolvedWorkspace);
-      expect(startBody.prompt).toContain("Source: ChatGPT via Vibe Codex");
-      expect(startBody.prompt).toContain(`projectId: ${registered.project.id}`);
-      expect(startBody.prompt).toContain("Project start goal");
+      const startParams = appServer.requests.find((request) => request.method === "thread/start")?.params;
+      expect(startParams.cwd).toBe(resolvedWorkspace);
+      const startTurn = appServer.requests.find((request) => request.method === "turn/start" && request.params.threadId === "project-thread-1")?.params;
+      expect(startTurn.input[0].text).toContain("Source: ChatGPT via Vibe Codex");
+      expect(startTurn.input[0].text).toContain(`projectId: ${registered.project.id}`);
+      expect(startTurn.input[0].text).toContain("Project start goal");
 
       const continueResponse = await postMcp({
         jsonrpc: "2.0",
@@ -512,9 +514,9 @@ describe("MCP Streamable HTTP sessions", () => {
       }, init.sessionId!);
       const continued = parseMcpResponse(await continueResponse.text()).result.structuredContent;
       expect(continued.threadId).toBe("project-thread-1");
-      const continueBody = requests.find((request) => request.method === "POST" && request.url === "/threads/project-thread-1/messages")?.body;
-      expect(continueBody.instruction).toContain("Continue project");
-      expect(continueBody.instruction).toContain("codexThreadId: project-thread-1");
+      const continueTurn = appServer.requests.filter((request) => request.method === "turn/start" && request.params.threadId === "project-thread-1").at(-1)?.params;
+      expect(continueTurn.input[0].text).toContain("Continue project");
+      expect(continueTurn.input[0].text).toContain("codexThreadId: project-thread-1");
 
       const runsResponse = await postMcp({
         jsonrpc: "2.0",
@@ -526,7 +528,7 @@ describe("MCP Streamable HTTP sessions", () => {
       expect(runs.length).toBeGreaterThanOrEqual(2);
       expect(runs.every((run: any) => run.metadata.projectId === registered.project.id)).toBe(true);
     } finally {
-      await new Promise<void>((resolve) => appServer.close(() => resolve()));
+      await new Promise<void>((resolve) => appServer.httpServer.close(() => resolve()));
     }
   });
 
@@ -544,24 +546,34 @@ describe("MCP Streamable HTTP sessions", () => {
     const fakeCodex = path.join(ctx.root, "fake-codex");
     await fs.writeFile(fakeCodex, `#!/usr/bin/env node
 const http = require("node:http");
+const { createRequire } = require("node:module");
+const requireFromCwd = createRequire(process.cwd() + "/package.json");
+const { WebSocketServer } = requireFromCwd("ws");
 const listenArg = process.argv[process.argv.indexOf("--listen") + 1];
 const url = new URL(listenArg);
-const server = http.createServer(async (req, res) => {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  const text = Buffer.concat(chunks).toString("utf8");
-  const body = text ? JSON.parse(text) : undefined;
+const server = http.createServer((req, res) => {
   const send = (payload) => {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify(payload));
   };
-  if (req.method === "GET" && req.url === "/health") return send({ status: "ok" });
-  if (req.method === "POST" && req.url === "/threads") return send({ threadId: "auto-thread", status: "running", body });
-  if (req.method === "POST" && req.url === "/threads/auto-thread/messages") return send({ threadId: "auto-thread", status: "running", body });
+  if (req.method === "GET" && (req.url === "/healthz" || req.url === "/readyz")) return send({ status: "ok" });
   res.writeHead(404).end();
 });
+const wss = new WebSocketServer({ server });
+wss.on("connection", (socket) => {
+  socket.on("message", (data) => {
+    const request = JSON.parse(data.toString("utf8"));
+    if (!request.id) return;
+    const respond = (result) => socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+    if (request.method === "initialize") return respond({ protocolVersion: "0.1" });
+    if (request.method === "thread/start") return respond({ thread: { id: "auto-thread", status: { type: "running" } } });
+    if (request.method === "thread/resume") return respond({ thread: { id: request.params.threadId, status: { type: "running" } } });
+    if (request.method === "turn/start") return respond({ turn: { id: "auto-turn", status: "running" } });
+    return socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "Method not found" } }));
+  });
+});
 server.listen(Number(url.port), url.hostname);
-process.on("SIGTERM", () => server.close(() => process.exit(0)));
+process.on("SIGTERM", () => wss.close(() => server.close(() => process.exit(0))));
 `);
     await fs.chmod(fakeCodex, 0o755);
     ctx.config.codexAppServerMode = "auto";
@@ -592,8 +604,12 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
     const started = parseMcpResponse(await startResponse.text()).result.structuredContent;
     expect(started.threadId).toBe("auto-thread");
     expect(started.noPaste).toBe(true);
+    expect(started.promptSubmittedAutomatically).toBe(true);
+    expect(started.requiresManualPaste).toBe(false);
+    expect(started.usesCodexExec).toBe(false);
+    expect(started.usesShellScript).toBe(false);
     expect(started.appServer.startedByVibeCodex).toBe(true);
-    expect(started.appServer.url).toBe(`http://127.0.0.1:${port}`);
+    expect(started.appServer.url).toBe(`ws://127.0.0.1:${port}`);
     expect(started.appServer.listenUrl).toBe(`ws://127.0.0.1:${port}`);
 
     const continueResponse = await postMcp({
@@ -637,7 +653,8 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
     const payload = parseMcpResponse(await startResponse.text());
     expect(payload.result.isError).toBe(true);
     expect(payload.result.structuredContent.error.code).toBe("CODEX_APP_SERVER_UNAVAILABLE");
-    expect(payload.result.structuredContent.error.details.fallbackExecutionModes).toEqual(["app-supervised", "codex-app-visible", "ghostty-visible"]);
+    expect(payload.result.structuredContent.error.details.recommendedExecutionMode).toBe("ghostty-visible");
+    expect(payload.result.structuredContent.error.details.fallbackExecutionModes).toEqual(["ghostty-visible", "codex-app-visible", "app-supervised"]);
   });
 
   it("start_codex_task fails clearly when workspace is not Git", async () => {

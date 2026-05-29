@@ -34,6 +34,8 @@ export function compileProjectCodexPrompt(args: {
     "- Do not use sudo.",
     "- Do not make unrelated changes.",
     "- Avoid destructive/system actions unless explicitly approved.",
+    "- Keep file discovery scoped to this workspace root; use `rg --files` or `find .`, not `find ..`.",
+    "- Do not search parent directories unless explicitly requested.",
     ...((args.constraints ?? []).map((item) => `- ${item}`)),
     "",
     "Expected report fields:",

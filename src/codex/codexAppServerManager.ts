@@ -74,7 +74,7 @@ function apiUrlFromListenUrl(rawUrl: string): string {
 async function probeUrl(rawUrl: string, config: Config): Promise<{ available: boolean; details?: unknown; error?: string }> {
   assertLocalUrl(rawUrl, config);
   const base = apiUrlFromListenUrl(rawUrl);
-  const candidates = ["/health", "/status", "/threads"];
+  const candidates = ["/healthz", "/readyz", "/health", "/status"];
   let last: string | undefined;
   for (const candidate of candidates) {
     try {
@@ -84,7 +84,13 @@ async function probeUrl(rawUrl: string, config: Config): Promise<{ available: bo
         continue;
       }
       const text = await response.text();
-      return { available: true, details: text ? JSON.parse(text) : {} };
+      let details: unknown = {};
+      try {
+        details = text ? JSON.parse(text) : {};
+      } catch {
+        details = { body: text };
+      }
+      return { available: true, details };
     } catch (error) {
       last = error instanceof Error ? error.message : String(error);
     }
@@ -112,7 +118,7 @@ function currentManagedStatus(config: Config): CodexAppServerStatus | undefined 
   }
   return {
     available: true,
-    url: managed.url,
+    url: managed.listenUrl,
     listenUrl: managed.listenUrl,
     transport: config.codexAppServerTransport,
     pid: managed.child.pid,
@@ -144,7 +150,7 @@ export async function detectManagedCodexAppServer(config: Config): Promise<Codex
       if (probe.available) {
         return {
           available: true,
-          url: apiUrlFromListenUrl(candidate),
+          url: candidate,
           listenUrl: candidate,
           transport: candidate.startsWith("ws") ? "ws" : "http",
           startedByVibeCodex: false,
@@ -160,7 +166,7 @@ export async function detectManagedCodexAppServer(config: Config): Promise<Codex
 
   return {
     available: false,
-    url: candidates[0] ? apiUrlFromListenUrl(candidates[0]) : undefined,
+    url: candidates[0],
     listenUrl: candidates[0],
     transport: config.codexAppServerTransport,
     startedByVibeCodex: false,
@@ -221,7 +227,7 @@ export async function startManagedCodexAppServer(config: Config): Promise<CodexA
 
   return {
     available: true,
-    url: apiUrl,
+    url: listenUrl,
     listenUrl,
     transport: config.codexAppServerTransport,
     pid: child.pid,
