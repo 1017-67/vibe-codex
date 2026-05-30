@@ -91,6 +91,7 @@ Call `relay_health`, then `connector_setup_status`.
    - result includes `mode`, `transport`, and a `lastError` when available.
 3. With `CODEX_APP_SERVER_MODE=auto`, call `start_codex_app_server`.
 4. Confirm startup binds only to `127.0.0.1`, returns `available`, `url`, `listenUrl`, `transport`, `pid`, `startedByVibeCodex`, and `logDir`.
+   By default, managed startup should report `isolatedMcpServers: true`, meaning Vibe Codex started app-server with `-c 'mcp_servers={}'` to avoid unrelated Codex MCP/plugin auth failures.
 5. Call `get_codex_app_server_status`; confirm it matches the running server.
 6. Call `list_codex_threads`, then `start_codex_app_thread` against a safe Git workspace.
 7. Confirm app-thread responses include `runId`, `threadId`, `status`, `workspacePath`, and any returned `summary`/events.

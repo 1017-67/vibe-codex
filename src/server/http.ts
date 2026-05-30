@@ -360,7 +360,7 @@ export function createHttpApp(config: Config, createServer: () => McpServer, aut
   app.use(express.urlencoded({ extended: false }));
 
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", version: "0.2.0" });
+    res.json({ status: "ok", version: "0.2.1" });
   });
 
   app.get("/.well-known/oauth-protected-resource", (req, res) => {

@@ -226,7 +226,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       uri: uri.href,
       mimeType: "application/json",
       text: JSON.stringify({
-        version: "0.2.0",
+        version: "0.2.1",
         allowedRoots: config.allowedRoots,
         defaultParentDir: config.defaultParentDir,
         urlTokenAuthEnabled: config.allowUrlTokenAuth,
@@ -245,7 +245,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     const codexVersion = await getCodexVersion(config);
     return {
       status: codexVersion ? "ok" : "degraded",
-      version: "0.2.0",
+      version: "0.2.1",
       codexAvailable: !!codexVersion,
       codexVersion: codexVersion ?? undefined,
       terminal: {
@@ -274,12 +274,21 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     const baseUrl = args?.baseUrl ?? config.publicBaseUrl;
     const recentRuns = runStore.listRuns().slice(0, args?.recentRunLimit ?? 5);
     const pendingApprovals = approvalStore.list("pending");
+    const connectorUsesOAuth = config.enableExperimentalOAuth;
+    const mcpUrl = baseUrl
+      ? connectorUsesOAuth
+        ? `${baseUrl.replace(/\/+$/, "")}/mcp`
+        : buildConnectorUrl({ baseUrl })
+      : connectorUsesOAuth
+        ? "https://<ngrok-url>/mcp"
+        : "https://<ngrok-url>/mcp/<URL_TOKEN>";
     return {
       status: "ok",
-      version: "0.2.0",
+      version: "0.2.1",
       chatGptDeveloperMode: {
-        authentication: "No auth",
-        mcpUrl: baseUrl ? buildConnectorUrl({ baseUrl }) : "https://<ngrok-url>/mcp/<URL_TOKEN>",
+        authentication: connectorUsesOAuth ? "OAuth" : "No auth",
+        mcpUrl,
+        oauthEnabled: config.enableExperimentalOAuth,
         urlTokenAuthEnabled: config.allowUrlTokenAuth,
       },
       tunnel: {
@@ -306,10 +315,12 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
   }, async (args) => safeTool(async () => {
     const baseUrl = args?.baseUrl ?? config.publicBaseUrl;
     if (!baseUrl) throw new VibeError("CONFIG_ERROR", "Provide baseUrl or set PUBLIC_BASE_URL.", {});
+    const connectorUsesOAuth = config.enableExperimentalOAuth;
     return {
-      authentication: "No auth",
-      mcpUrl: buildConnectorUrl({ baseUrl }),
-      tokenRedacted: true,
+      authentication: connectorUsesOAuth ? "OAuth" : "No auth",
+      mcpUrl: connectorUsesOAuth ? `${baseUrl.replace(/\/+$/, "")}/mcp` : buildConnectorUrl({ baseUrl }),
+      tokenRedacted: !connectorUsesOAuth,
+      oauthEnabled: config.enableExperimentalOAuth,
       urlTokenAuthEnabled: config.allowUrlTokenAuth,
       warnings: authWarnings(config),
     };
@@ -389,7 +400,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
   }));
 
   server.registerTool("start_project_task", {
-    description: "Start a task in an existing registered project. Uses codex-app-thread for no-paste app execution when available; does not create a workspace.",
+    description: "Start an implementation or inspection task in an existing registered project. This compiles a Vibe Codex handoff prompt. Do not use it to send a plain message to an existing Codex chat; use list_codex_threads then continue_codex_app_thread instead.",
     inputSchema: z.object({
       projectRef: z.string(),
       userGoal: z.string(),
@@ -495,7 +506,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
   }));
 
   server.registerTool("continue_project_task", {
-    description: "Continue a registered project task. Defaults to the project's default Codex thread for no-paste app-server continuation.",
+    description: "Continue an implementation or inspection task for a registered project using the project's default Codex thread. This compiles a Vibe Codex handoff prompt. Do not use it to send a plain message to an existing Codex chat; use continue_codex_app_thread instead.",
     inputSchema: z.object({ projectRef: z.string(), instruction: z.string(), executionMode: ProjectExecutionModeSchema.optional(), autonomy: Autonomy.optional(), codexThreadId: z.string().optional(), setDefaultThread: z.boolean().optional() }),
   }, async (args) => safeTool(async () => {
     const project = await resolveProject(args.projectRef);
@@ -928,7 +939,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
   }, async () => safeTool(async () => detectManagedCodexAppServer(config)));
 
   server.registerTool("list_codex_threads", {
-    description: "List Codex app-server threads when the experimental app-server is available.",
+    description: "List local Codex app-server chats/threads. Use this to find an existing Codex chat by name, preview, or thread id before sending a plain follow-up with continue_codex_app_thread.",
     inputSchema: z.object({}).optional(),
   }, async () => safeTool(async () => {
     const status = await ensureCodexAppServer(config);
@@ -936,8 +947,8 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
   }));
 
   server.registerTool("start_codex_app_thread", {
-    description: "Start an experimental Codex app-server thread for a safe workspace. Falls back by recommendation only; it does not GUI-automate Codex Desktop.",
-    inputSchema: z.object({ workspacePath: z.string(), userGoal: z.string(), autonomy: Autonomy.optional() }),
+    description: "Start a new local Codex app-server thread for a safe workspace. This compiles a normal Codex task prompt for new work. For an existing named chat, use list_codex_threads then continue_codex_app_thread.",
+    inputSchema: z.object({ workspacePath: z.string(), userGoal: z.string().describe("Goal for a new Codex task, not a plain message to an existing chat."), autonomy: Autonomy.optional() }),
   }, async (args) => safeTool(async () => {
     const autonomy = args.autonomy ?? "workspace";
     if (!canRunCodex(autonomy)) throw new VibeError("APPROVAL_REQUIRED", "Manual autonomy cannot start Codex app threads.", { autonomy });
@@ -968,8 +979,8 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
   }));
 
   server.registerTool("resume_codex_app_thread", {
-    description: "Resume an experimental Codex app-server thread in a safe workspace.",
-    inputSchema: z.object({ threadId: z.string(), workspacePath: z.string(), prompt: z.string().optional(), autonomy: Autonomy.optional() }),
+    description: "Resume an existing local Codex app-server thread in a safe workspace. If prompt is provided, it is sent as raw Codex input without a Vibe project handoff envelope.",
+    inputSchema: z.object({ threadId: z.string(), workspacePath: z.string(), prompt: z.string().describe("Optional raw text to submit to the existing Codex thread.").optional(), autonomy: Autonomy.optional() }),
   }, async (args) => safeTool(async () => {
     const autonomy = args.autonomy ?? "workspace";
     if (!canRunCodex(autonomy)) throw new VibeError("APPROVAL_REQUIRED", "Manual autonomy cannot resume Codex app threads.", { autonomy });
@@ -1017,17 +1028,40 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
   }
 
   server.registerTool("continue_codex_app_thread", {
-    description: "Run a local Codex app-server turn in an existing Codex thread for this Mac. This targets the user's local code agent, not a person or external messaging service.",
-    inputSchema: z.object({ threadId: z.string(), instruction: z.string(), workspacePath: z.string().optional(), autonomy: Autonomy.optional() }),
+    description: "Send raw text as a local Codex app-server turn in an existing Codex chat/thread on this Mac. Use this when the user asks to send a plain message to a named Codex app chat. This targets the user's local code agent, not a person or external messaging service, and it does not add a Vibe Codex handoff envelope.",
+    inputSchema: z.object({
+      threadId: z.string().describe("Existing Codex app-server thread id, usually found with list_codex_threads."),
+      instruction: z.string().describe("Raw text to submit to the existing Codex chat/thread. Do not wrap this in a Vibe Codex handoff envelope for simple message delivery."),
+      workspacePath: z.string().optional().describe("Safe workspace path for the thread when Vibe Codex has no prior run mapping."),
+      autonomy: Autonomy.optional(),
+    }),
   }, async (args) => safeTool(async () => {
     return runLocalCodexThreadTurn(args);
   }));
 
   server.registerTool("run_codex_app_thread_turn", {
-    description: "Run a local Codex app-server turn in an existing local Codex thread. Use this OAuth-friendly alias for code-agent continuation when direct thread continuation is blocked by client-side policy.",
-    inputSchema: z.object({ threadId: z.string(), task: z.string(), workspacePath: z.string().optional(), autonomy: Autonomy.optional() }),
+    description: "Alias for continue_codex_app_thread. Send one raw no-paste turn to an existing local Codex app chat/thread. Use this for simple message delivery; it does not create a project task and does not add a Vibe Codex handoff envelope.",
+    inputSchema: z.object({
+      threadId: z.string().describe("Existing Codex app-server thread id, usually found with list_codex_threads."),
+      instruction: z.string().optional().describe("Raw text to submit exactly as the Codex app thread turn."),
+      task: z.string().optional().describe("Deprecated alias for instruction, kept for older ChatGPT tool handles."),
+      workspacePath: z.string().optional().describe("Safe workspace path for the thread when Vibe Codex has no prior run mapping."),
+      autonomy: Autonomy.optional(),
+    }).refine((value) => !!(value.instruction ?? value.task), { message: "instruction or task is required" }),
   }, async (args) => safeTool(async () => {
-    return runLocalCodexThreadTurn({ threadId: args.threadId, instruction: args.task, workspacePath: args.workspacePath, autonomy: args.autonomy });
+    return runLocalCodexThreadTurn({ threadId: args.threadId, instruction: args.instruction ?? args.task!, workspacePath: args.workspacePath, autonomy: args.autonomy });
+  }));
+
+  server.registerTool("send_codex_app_thread_message", {
+    description: "Send a plain raw message to an existing local Codex app chat/thread by thread id. Use list_codex_threads first when the user names a Codex chat. This is no-paste app-server delivery and does not add a Vibe Codex handoff envelope.",
+    inputSchema: z.object({
+      threadId: z.string().describe("Existing Codex app-server thread id, usually found with list_codex_threads."),
+      message: z.string().describe("Plain message text to submit exactly to the Codex chat/thread."),
+      workspacePath: z.string().optional().describe("Safe workspace path for the thread when Vibe Codex has no prior run mapping."),
+      autonomy: Autonomy.optional(),
+    }),
+  }, async (args) => safeTool(async () => {
+    return runLocalCodexThreadTurn({ threadId: args.threadId, instruction: args.message, workspacePath: args.workspacePath, autonomy: args.autonomy });
   }));
 
   server.registerTool("fork_codex_app_thread", {

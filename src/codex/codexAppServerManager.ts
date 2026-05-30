@@ -110,6 +110,32 @@ async function waitForHealthy(url: string, config: Config, timeoutMs = 8_000) {
   throw new VibeError("CODEX_APP_SERVER_UNAVAILABLE", "Codex app-server did not become healthy after startup.", fallbackDetails({ lastError: last }));
 }
 
+async function tailFile(filePath: string, maxBytes = 16_000): Promise<string | undefined> {
+  try {
+    const stat = await fsp.stat(filePath);
+    const handle = await fsp.open(filePath, "r");
+    try {
+      const start = Math.max(0, stat.size - maxBytes);
+      const buffer = Buffer.alloc(stat.size - start);
+      await handle.read(buffer, 0, buffer.length, start);
+      return buffer.toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+async function startupLogDetails(config: Config, logDir: string) {
+  const stdoutTail = await tailFile(path.join(logDir, "stdout.log"));
+  const stderrTail = await tailFile(path.join(logDir, "stderr.log"));
+  return {
+    stdoutTail: stdoutTail ? redact(config, stdoutTail) : undefined,
+    stderrTail: stderrTail ? redact(config, stderrTail) : undefined,
+  };
+}
+
 function currentManagedStatus(config: Config): CodexAppServerStatus | undefined {
   if (!managed) return undefined;
   if (managed.child.exitCode != null || managed.child.killed) {
@@ -133,7 +159,10 @@ export async function detectManagedCodexAppServer(config: Config): Promise<Codex
   const current = currentManagedStatus(config);
   if (current) {
     const probe = await probeUrl(current.url!, config);
-    if (probe.available) return current;
+    if (probe.available) {
+      lastError = undefined;
+      return { ...current, lastError: undefined };
+    }
   }
   if (config.codexAppServerMode === "disabled") {
     return { available: false, transport: config.codexAppServerTransport, startedByVibeCodex: false, mode: config.codexAppServerMode, lastError: "CODEX_APP_SERVER_MODE=disabled", details: fallbackDetails() };
@@ -148,6 +177,7 @@ export async function detectManagedCodexAppServer(config: Config): Promise<Codex
     try {
       const probe = await probeUrl(candidate, config);
       if (probe.available) {
+        lastError = undefined;
         return {
           available: true,
           url: candidate,
@@ -200,7 +230,13 @@ export async function startManagedCodexAppServer(config: Config): Promise<CodexA
   await fsp.mkdir(logDir, { recursive: true });
   const stdoutLog = fs.createWriteStream(path.join(logDir, "stdout.log"), { flags: "a" });
   const stderrLog = fs.createWriteStream(path.join(logDir, "stderr.log"), { flags: "a" });
-  const child = spawn(config.codexBin, ["app-server", "--listen", listenUrl], {
+  const appServerArgs = [
+    "app-server",
+    ...(config.codexAppServerIsolateMcpServers ? ["-c", "mcp_servers={}"] : []),
+    "--listen",
+    listenUrl,
+  ];
+  const child = spawn(config.codexBin, appServerArgs, {
     stdio: ["ignore", "pipe", "pipe"],
     env: process.env,
   });
@@ -220,8 +256,18 @@ export async function startManagedCodexAppServer(config: Config): Promise<CodexA
 
   try {
     await waitForHealthy(apiUrl, config);
+    lastError = undefined;
   } catch (error) {
     child.kill("SIGTERM");
+    const logs = await startupLogDetails(config, logDir);
+    if (error instanceof VibeError) {
+      throw new VibeError(error.code, error.message, {
+        ...error.details,
+        ...logs,
+        command: `${config.codexBin} ${appServerArgs.join(" ")}`,
+        isolatedMcpServers: config.codexAppServerIsolateMcpServers,
+      });
+    }
     throw error;
   }
 
@@ -234,6 +280,10 @@ export async function startManagedCodexAppServer(config: Config): Promise<CodexA
     startedByVibeCodex: true,
     mode: config.codexAppServerMode,
     logDir,
+    details: {
+      isolatedMcpServers: config.codexAppServerIsolateMcpServers,
+      command: `${config.codexBin} ${appServerArgs.join(" ")}`,
+    },
   };
 }
 

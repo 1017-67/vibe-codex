@@ -11,7 +11,7 @@ export interface ServerStores {
 }
 
 export function createMcpServer(config: Config, runStore: RunStore, stores: ServerStores): McpServer {
-  const server = new McpServer({ name: "vibe-codex", version: "0.2.0" });
+  const server = new McpServer({ name: "vibe-codex", version: "0.2.1" });
   registerTools(server, config, runStore, stores);
   return server;
 }

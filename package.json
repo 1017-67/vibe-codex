@@ -1,6 +1,6 @@
 {
   "name": "vibe-codex",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Local MCP relay that lets ChatGPT safely orchestrate Codex on a Mac.",
   "type": "module",
   "main": "dist/index.js",

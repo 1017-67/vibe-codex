@@ -128,6 +128,16 @@ describe("MCP Streamable HTTP sessions", () => {
     expect(payload.result.tools.map((tool: any) => tool.name)).toContain("relay_health");
     expect(payload.result.tools.map((tool: any) => tool.name)).toContain("detect_codex_app_server");
     expect(payload.result.tools.map((tool: any) => tool.name)).toContain("start_codex_app_thread");
+    expect(payload.result.tools.map((tool: any) => tool.name)).toContain("run_codex_app_thread_turn");
+    expect(payload.result.tools.map((tool: any) => tool.name)).toContain("send_codex_app_thread_message");
+    const continueThreadTool = payload.result.tools.find((tool: any) => tool.name === "continue_codex_app_thread");
+    const sendMessageTool = payload.result.tools.find((tool: any) => tool.name === "send_codex_app_thread_message");
+    const startProjectTool = payload.result.tools.find((tool: any) => tool.name === "start_project_task");
+    expect(continueThreadTool.description).toContain("raw text");
+    expect(continueThreadTool.description).toContain("does not add a Vibe Codex handoff envelope");
+    expect(sendMessageTool.description).toContain("plain raw message");
+    expect(sendMessageTool.description).toContain("does not add a Vibe Codex handoff envelope");
+    expect(startProjectTool.description).toContain("Do not use it to send a plain message");
   });
 
   it("tools/list without a valid session returns 400 instead of 500", async () => {
@@ -167,7 +177,7 @@ describe("MCP Streamable HTTP sessions", () => {
     }, init.sessionId!);
     const payload = parseMcpResponse(await response.text());
     expect(response.status).toBe(200);
-    expect(payload.result.structuredContent.version).toBe("0.2.0");
+    expect(payload.result.structuredContent.version).toBe("0.2.1");
     expect(["ok", "degraded"]).toContain(payload.result.structuredContent.status);
   });
 
@@ -403,9 +413,43 @@ describe("MCP Streamable HTTP sessions", () => {
       expect(continued.workspacePath).toBe(resolvedWorkspace);
       expect(appServer.requests.find((request) => request.method === "turn/start" && request.params.input?.[0]?.text === "Continue thread")?.params).toMatchObject({ threadId: "thread-1" });
 
-      const resumeResponse = await postMcp({
+      const rawTurnResponse = await postMcp({
         jsonrpc: "2.0",
         id: 20,
+        method: "tools/call",
+        params: { name: "run_codex_app_thread_turn", arguments: { threadId: "thread-1", instruction: "Raw thread turn" } },
+      }, init.sessionId!);
+      const rawTurn = parseMcpResponse(await rawTurnResponse.text()).result.structuredContent;
+      expect(rawTurn.threadId).toBe("thread-1");
+      expect(rawTurn.promptSubmittedAutomatically).toBe(true);
+      expect(rawTurn.requiresManualPaste).toBe(false);
+      expect(appServer.requests.find((request) => request.method === "turn/start" && request.params.input?.[0]?.text === "Raw thread turn")?.params.threadId).toBe("thread-1");
+
+      const legacyRawTurnResponse = await postMcp({
+        jsonrpc: "2.0",
+        id: 21,
+        method: "tools/call",
+        params: { name: "run_codex_app_thread_turn", arguments: { threadId: "thread-1", task: "Legacy raw thread turn" } },
+      }, init.sessionId!);
+      const legacyRawTurn = parseMcpResponse(await legacyRawTurnResponse.text()).result.structuredContent;
+      expect(legacyRawTurn.threadId).toBe("thread-1");
+      expect(appServer.requests.find((request) => request.method === "turn/start" && request.params.input?.[0]?.text === "Legacy raw thread turn")?.params.threadId).toBe("thread-1");
+
+      const sendMessageResponse = await postMcp({
+        jsonrpc: "2.0",
+        id: 22,
+        method: "tools/call",
+        params: { name: "send_codex_app_thread_message", arguments: { threadId: "thread-1", message: "Plain chat message" } },
+      }, init.sessionId!);
+      const sentMessage = parseMcpResponse(await sendMessageResponse.text()).result.structuredContent;
+      expect(sentMessage.threadId).toBe("thread-1");
+      expect(sentMessage.promptSubmittedAutomatically).toBe(true);
+      expect(sentMessage.requiresManualPaste).toBe(false);
+      expect(appServer.requests.find((request) => request.method === "turn/start" && request.params.input?.[0]?.text === "Plain chat message")?.params.threadId).toBe("thread-1");
+
+      const resumeResponse = await postMcp({
+        jsonrpc: "2.0",
+        id: 23,
         method: "tools/call",
         params: { name: "resume_codex_app_thread", arguments: { threadId: "thread-1", workspacePath: workspace, prompt: "Resume thread" } },
       }, init.sessionId!);
@@ -418,7 +462,7 @@ describe("MCP Streamable HTTP sessions", () => {
 
       const forkResponse = await postMcp({
         jsonrpc: "2.0",
-        id: 21,
+        id: 24,
         method: "tools/call",
         params: { name: "fork_codex_app_thread", arguments: { threadId: "thread-1", workspacePath: workspace, instruction: "Fork thread" } },
       }, init.sessionId!);
@@ -432,7 +476,7 @@ describe("MCP Streamable HTTP sessions", () => {
       ctx.config.codexBin = "definitely-not-installed-codex";
       const startViaGenericResponse = await postMcp({
         jsonrpc: "2.0",
-        id: 22,
+        id: 25,
         method: "tools/call",
         params: {
           name: "start_codex_task",
@@ -452,7 +496,7 @@ describe("MCP Streamable HTTP sessions", () => {
 
       const statusResponse = await postMcp({
         jsonrpc: "2.0",
-        id: 23,
+        id: 26,
         method: "tools/call",
         params: { name: "get_codex_app_thread_status", arguments: { threadId: "thread-1" } },
       }, init.sessionId!);

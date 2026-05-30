@@ -123,7 +123,7 @@ export class CodexAppServerWsClient {
 
   async initialize(): Promise<unknown> {
     const response = await this.request("initialize", {
-      clientInfo: { name: "vibe-codex", version: "0.2.0" },
+      clientInfo: { name: "vibe-codex", version: "0.2.1" },
       capabilities: {
         experimentalApi: true,
         requestAttestation: false,

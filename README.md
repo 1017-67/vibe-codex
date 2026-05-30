@@ -289,6 +289,7 @@ CODEX_APP_SERVER_HOST=127.0.0.1
 CODEX_APP_SERVER_TRANSPORT=ws
 CODEX_APP_SERVER_AUTOSTART=true
 CODEX_APP_SERVER_LOG_DIR=.vibe-codex/app-server
+CODEX_APP_SERVER_ISOLATE_MCP_SERVERS=true
 ```
 
 Modes:
@@ -306,6 +307,8 @@ Lifecycle tools:
 - `get_codex_app_server_status`: report availability, URL, transport, PID, log dir, and last error.
 
 Vibe Codex does not GUI-automate Codex Desktop. App-thread tools only call local app-server APIs, bind startup to `127.0.0.1` by default, and the relay never exposes raw app-server access externally. If the user asks for no-paste Codex app execution, use `codex-app-thread`; if unavailable, call `start_codex_app_server`; if startup still fails, recommend `codex-app-visible` or `ghostty-visible`.
+
+By default, Vibe Codex starts managed app-server with `-c 'mcp_servers={}'`. This isolates the no-paste app-thread bridge from unrelated Codex Desktop MCP/plugin auth failures while preserving the app-thread API needed for local Codex turns.
 
 The project handoff prompt also tells Codex to keep searches scoped to the workspace root: use `rg --files` or `find .`, not `find ..`, unless the user explicitly asks to inspect parent directories.
 

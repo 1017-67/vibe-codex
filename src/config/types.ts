@@ -29,6 +29,7 @@ export interface Config {
   codexAppServerAutostart: boolean;
   codexAppServerLogDir: string;
   codexAppServerAllowPublicHost: boolean;
+  codexAppServerIsolateMcpServers: boolean;
   databasePath: string;
   defaultCodexApproval: string;
   defaultCodexSandbox: string;

@@ -31,6 +31,7 @@ export async function tempConfig(): Promise<{ config: Config; root: string; clea
     codexAppServerAutostart: true,
     codexAppServerLogDir: path.join(root, ".vibe-codex", "app-server"),
     codexAppServerAllowPublicHost: false,
+    codexAppServerIsolateMcpServers: true,
     databasePath: path.join(root, "test.sqlite"),
     defaultCodexApproval: "on-request",
     defaultCodexSandbox: "workspace-write",

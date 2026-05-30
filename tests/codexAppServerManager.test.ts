@@ -70,6 +70,7 @@ describe("Codex app-server manager", () => {
       expect(status.startedByVibeCodex).toBe(true);
       expect(status.url).toBe(`ws://127.0.0.1:${ctx.config.codexAppServerPort}`);
       expect(status.pid).toBeGreaterThan(0);
+      expect(status.details).toMatchObject({ isolatedMcpServers: true });
       const stopped = await stopManagedCodexAppServer(ctx.config);
       expect(stopped.available).toBe(false);
     } finally {

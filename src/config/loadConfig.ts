@@ -110,6 +110,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     codexAppServerAutostart: bool(env.CODEX_APP_SERVER_AUTOSTART, true),
     codexAppServerLogDir: path.resolve(expandHome(env.CODEX_APP_SERVER_LOG_DIR ?? ".vibe-codex/app-server")),
     codexAppServerAllowPublicHost: bool(env.CODEX_APP_SERVER_ALLOW_PUBLIC_HOST, false),
+    codexAppServerIsolateMcpServers: bool(env.CODEX_APP_SERVER_ISOLATE_MCP_SERVERS, true),
     databasePath: path.resolve(env.DATABASE_PATH ?? "./vibe-codex.sqlite"),
     defaultCodexApproval: env.DEFAULT_CODEX_APPROVAL || "untrusted",
     defaultCodexSandbox: env.DEFAULT_CODEX_SANDBOX || "workspace-write",
