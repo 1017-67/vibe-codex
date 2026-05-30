@@ -1,0 +1,8 @@
+codex app-server (WebSockets)
+  listening on: ws://127.0.0.1:8765
+  readyz: http://127.0.0.1:8765/readyz
+  healthz: http://127.0.0.1:8765/healthz
+  note: binds localhost only (use SSH port-forwarding for remote access)
+[2m2026-05-30T02:24:37.073940Z[0m [31mERROR[0m [2mrmcp::transport::worker[0m[2m:[0m worker quit with fatal: Transport channel closed, when Auth(TokenRefreshFailed("Server returned error response: invalid_grant: Token refresh failed; reauthorization is required"))
+[2m2026-05-30T02:24:37.450392Z[0m [31mERROR[0m [2mcodex_memories_write::phase2::job[0m[2m:[0m failed to claim job: error returned from database: (code: 1) no such table: jobs
+[2m2026-05-30T02:25:08.199589Z[0m [31mERROR[0m [2mcodex_memories_write::phase2::job[0m[2m:[0m failed to claim job: error returned from database: (code: 1) no such table: jobs
