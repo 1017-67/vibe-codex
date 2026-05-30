@@ -99,6 +99,20 @@ function hiddenInputs(fields: Record<string, string | undefined>): string {
     .join("\n      ");
 }
 
+function authorizePageCsp(config: Config): string {
+  const redirectHosts = config.oauthAllowedRedirectHosts
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean)
+    .map((host) => `https://${host}`);
+  return [
+    "default-src 'none'",
+    "style-src 'unsafe-inline'",
+    `form-action 'self' ${redirectHosts.join(" ")}`.trim(),
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}
+
 function renderAuthorizePage(args: {
   config: Config;
   issuer: string;
@@ -332,7 +346,8 @@ async function cleanupMcpSessions(sessions: Map<string, McpSession>, authSession
   }
 }
 
-export function createHttpApp(config: Config, createServer: () => McpServer, authSessions = new AuthSessionStore(), oauthStore = new OAuthStore()) {
+export function createHttpApp(config: Config, createServer: () => McpServer, authSessions = new AuthSessionStore(), oauthStore?: OAuthStore) {
+  oauthStore ??= new OAuthStore(config.databasePath);
   const app = express();
   const sessions = new Map<string, McpSession>();
   const mcpInitializeLimiter = new RateLimiter(60, 60_000);
@@ -416,7 +431,7 @@ export function createHttpApp(config: Config, createServer: () => McpServer, aut
       return res.redirect(url.toString());
     }
     res
-      .setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+      .setHeader("Content-Security-Policy", authorizePageCsp(config))
       .type("html")
       .send(renderAuthorizePage({
         config,

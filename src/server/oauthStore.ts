@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import Database from "better-sqlite3";
 import { Config } from "../config/types.js";
 import { constantTimeEqual } from "../util/crypto.js";
 
@@ -34,6 +35,40 @@ export class OAuthStore {
   private clients = new Map<string, OAuthClientRecord>();
   private codes = new Map<string, OAuthAuthCodeRecord>();
   private tokens = new Map<string, OAuthAccessTokenRecord>();
+  private db?: Database.Database;
+
+  constructor(databasePath?: string) {
+    if (!databasePath) return;
+    this.db = new Database(databasePath);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS oauth_clients (
+        client_id TEXT PRIMARY KEY,
+        redirect_uris_json TEXT NOT NULL,
+        client_name TEXT,
+        created_at TEXT NOT NULL
+      )
+    `);
+    const rows = this.db.prepare("SELECT client_id, redirect_uris_json, client_name, created_at FROM oauth_clients").all() as Array<{
+      client_id: string;
+      redirect_uris_json: string;
+      client_name?: string | null;
+      created_at: string;
+    }>;
+    for (const row of rows) {
+      try {
+        const redirectUris = JSON.parse(row.redirect_uris_json);
+        if (!Array.isArray(redirectUris) || !redirectUris.every((uri) => typeof uri === "string")) continue;
+        this.clients.set(row.client_id, {
+          clientId: row.client_id,
+          redirectUris,
+          clientName: row.client_name ?? undefined,
+          createdAt: row.created_at,
+        });
+      } catch {
+        // Ignore malformed legacy rows instead of blocking OAuth startup.
+      }
+    }
+  }
 
   registerClient(args: { clientId?: string; redirectUris?: string[]; clientName?: string }): OAuthClientRecord {
     const clientId = args.clientId || `vibe_client_${randomUUID()}`;
@@ -44,6 +79,19 @@ export class OAuthStore {
       createdAt: new Date().toISOString(),
     };
     this.clients.set(clientId, record);
+    this.db?.prepare(`
+      INSERT INTO oauth_clients (client_id, redirect_uris_json, client_name, created_at)
+      VALUES (@clientId, @redirectUrisJson, @clientName, @createdAt)
+      ON CONFLICT(client_id) DO UPDATE SET
+        redirect_uris_json = excluded.redirect_uris_json,
+        client_name = excluded.client_name,
+        created_at = excluded.created_at
+    `).run({
+      clientId: record.clientId,
+      redirectUrisJson: JSON.stringify(record.redirectUris),
+      clientName: record.clientName ?? null,
+      createdAt: record.createdAt,
+    });
     return record;
   }
 

@@ -128,8 +128,12 @@ describe("experimental OAuth", () => {
     });
     const page = await fetch(`${baseUrl}/authorize?${params}`);
     const html = await page.text();
+    const csp = page.headers.get("content-security-policy") ?? "";
     expect(page.status).toBe(200);
-    expect(page.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("form-action 'self'");
+    expect(csp).toContain("https://chat.openai.com");
+    expect(csp).toContain("https://chatgpt.com");
     expect(html).toContain("Vibe Codex");
     expect(html).toContain("Local ChatGPT ↔ Codex pairing");
     expect(html).toContain("ChatGPT wants to connect");
@@ -178,6 +182,14 @@ describe("experimental OAuth", () => {
   it("rejects unknown OAuth clients", async () => {
     const response = await getCode({ clientId: "unknown-client", expectCode: false });
     expect(response.response.status).toBe(400);
+  });
+
+  it("persists registered OAuth clients across store instances", async () => {
+    const firstStore = new OAuthStore(ctx.config.databasePath);
+    const client = firstStore.registerClient({ redirectUris: ["https://chatgpt.com/connector/oauth/test"], clientName: "ChatGPT" });
+    const secondStore = new OAuthStore(ctx.config.databasePath);
+    expect(secondStore.validateClient(client.clientId)).toBe(true);
+    expect(secondStore.getClient(client.clientId)?.redirectUris).toEqual(["https://chatgpt.com/connector/oauth/test"]);
   });
 
   it("rejects invalid OAuth scope and empty provided state", async () => {
