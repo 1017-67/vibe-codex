@@ -82,4 +82,24 @@ Authentication: OAuth
 MCP URL: https://<ngrok-url>/mcp
 ```
 
+After connecting, smoke these through ChatGPT or an OAuth token:
+
+- `relay_health`
+- `connector_setup_status`
+- `resources/list`
+- `resources/read` for `vibe://status`
+- `resources/read` for `vibe://operator-guide`
+- `resources/read` for `vibe://feature-matrix`
+- `resources/read` for `vibe://setup`
+
+For plain messages to an existing Codex app chat, use `list_codex_threads` then `send_codex_app_thread_message`. Do not use `start_project_task` for plain messages; it intentionally adds the Vibe Codex handoff envelope for implementation tasks.
+
+The same OAuth connector path can be checked outside the ChatGPT UI with:
+
+```bash
+npm run verify:public
+```
+
+That script uses the configured `PUBLIC_BASE_URL`, dynamically registers an OAuth client, exchanges a PKCE code, initializes MCP, reads tools/resources, calls `relay_health` and `connector_setup_status`, checks app-server status, and registers the current repository without creating a new workspace.
+
 Keep URL-token auth available as a fallback while OAuth remains experimental.

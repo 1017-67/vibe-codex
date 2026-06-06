@@ -201,6 +201,43 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     return (await gitStatus(workspacePath, config).catch(() => undefined))?.stdout ?? "";
   }
 
+  function summarizeRun(run: ReturnType<RunStore["listRuns"]>[number]) {
+    return {
+      id: run.id,
+      workspacePath: run.workspacePath,
+      status: run.status,
+      autonomy: run.autonomy,
+      command: run.codexCommand,
+      exitCode: run.exitCode,
+      createdAt: run.createdAt,
+      updatedAt: run.updatedAt,
+      summary: run.summary,
+      metadata: {
+        executionMode: run.metadata?.executionMode,
+        projectId: run.metadata?.projectId,
+        codexThreadId: run.metadata?.codexThreadId,
+        parentRunId: run.metadata?.parentRunId,
+        promptPath: run.metadata?.promptPath,
+        metadataPath: run.metadata?.metadataPath,
+      },
+    };
+  }
+
+  function summarizeAuthSession(session: ReturnType<AuthSessionStore["list"]>[number]) {
+    return {
+      mcpSessionId: session.mcpSessionId,
+      authMethod: session.authMethod,
+      createdAt: session.createdAt,
+      lastSeenAt: session.lastSeenAt,
+      remoteHost: session.remoteHost,
+      userAgent: session.userAgent,
+      oauthTokenExpiresAt: session.oauthTokenExpiresAt,
+      oauthClientId: session.oauthClientId,
+      allowedRootCount: session.allowedRoots.length,
+      defaultAutonomy: session.defaultAutonomy,
+    };
+  }
+
   async function projectFallbackError() {
     const detection = await detectManagedCodexAppServer(config);
     return new VibeError("CODEX_APP_SERVER_UNAVAILABLE", detection.lastError ?? "Codex app-server is unavailable. Use app-supervised/codex-app-visible for manual GUI fallback or ghostty-visible for terminal automatic submission.", {
@@ -217,9 +254,115 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
     }
   }
 
+  async function readDocResource(relativePath: string, fallback: string) {
+    try {
+      return await fs.readFile(path.join(process.cwd(), relativePath), "utf8");
+    } catch {
+      return fallback;
+    }
+  }
+
+  function connectorMode() {
+    if (config.enableExperimentalOAuth) return "OAuth";
+    if (config.allowUrlTokenAuth) return "No auth with URL token";
+    return "Bearer";
+  }
+
+  function setupMarkdown() {
+    const baseUrl = config.publicBaseUrl ?? "https://<ngrok-url>";
+    const mcpUrl = config.enableExperimentalOAuth
+      ? `${baseUrl.replace(/\/+$/, "")}/mcp`
+      : config.allowUrlTokenAuth
+        ? buildConnectorUrl({ baseUrl })
+        : `${baseUrl.replace(/\/+$/, "")}/mcp`;
+    return `# Vibe Codex Setup
+
+## Local
+
+1. Run \`npm install\`.
+2. Copy \`.env.example\` to \`.env\`.
+3. Set \`ALLOWED_ROOTS\` to the local project roots ChatGPT may use.
+4. Run \`npm run dev\`.
+
+## ChatGPT Developer Mode
+
+- Authentication: \`${config.enableExperimentalOAuth ? "OAuth" : config.allowUrlTokenAuth ? "No auth" : "Bearer if your client supports static headers"}\`
+- MCP URL: \`${mcpUrl}\`
+
+For OAuth, set \`ENABLE_EXPERIMENTAL_OAUTH=true\`, \`PUBLIC_BASE_URL=${baseUrl}\`, and \`OAUTH_ISSUER_BASE_URL=${baseUrl}\`.
+
+For URL-token fallback, run \`npm run pair -- --write-env\` and use \`https://<ngrok-url>/mcp/<URL_TOKEN>\`. URL-token auth is development-only.
+
+## First Workflow
+
+1. Call \`relay_health\`.
+2. Call \`register_project\` for an existing Git workspace.
+3. Use \`start_project_task\` for implementation work.
+4. Use \`send_codex_app_thread_message\` for plain messages to existing Codex app threads.
+5. Use \`collect_project_result\`, \`git_status\`, and \`git_diff\` to inspect results.
+`;
+  }
+
+  function operatorGuideMarkdown() {
+    return `# Vibe Codex Operator Guide
+
+## Tool Selection
+
+- \`start_project_task\` and \`continue_project_task\` are for implementation or inspection tasks in registered projects. They add a Vibe Codex handoff envelope.
+- \`send_codex_app_thread_message\`, \`run_codex_app_thread_turn\`, and \`continue_codex_app_thread\` send raw/plain text to existing local Codex app threads. They do not add the handoff envelope.
+- \`codex-app-thread\` is true no-paste Codex app/thread execution through local app-server WebSocket JSON-RPC.
+- \`ghostty-visible\` is the no-paste terminal fallback.
+- \`codex-app-visible\` and \`app-supervised\` are manual-paste GUI fallbacks.
+
+## Safety Rules
+
+- Stay inside \`ALLOWED_ROOTS\`.
+- Do not read secrets.
+- Do not use \`sudo\`.
+- Dangerous commands never execute.
+- Do not use \`write_file\` as fallback after Codex failure unless the user explicitly authorizes direct writes.
+- Do not create a new workspace for a registered project task unless the user explicitly asks for new workspace creation.
+
+## Project Reuse
+
+Register a project once with \`register_project\`. Continue work by project id, name, or workspace path. \`continue_project_task\` uses the project's default Codex thread when available.
+`;
+  }
+
+  async function checkPublicReachability(baseUrl: string | undefined) {
+    if (!baseUrl) return { checked: false, reachable: false, reason: "PUBLIC_BASE_URL is not configured." };
+    const normalized = baseUrl.replace(/\/+$/, "");
+    const url = config.enableExperimentalOAuth
+      ? `${normalized}/.well-known/oauth-protected-resource`
+      : normalized;
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(2_500) });
+      const body = await response.text().catch(() => "");
+      const ngrokOffline = body.includes("ERR_NGROK_3200") || (body.includes("endpoint") && body.includes("is offline"));
+      return {
+        checked: true,
+        url,
+        reachable: response.ok && !ngrokOffline,
+        status: response.status,
+        reason: ngrokOffline
+          ? "ngrok endpoint is offline"
+          : response.ok
+            ? "reachable"
+            : `HTTP ${response.status}`,
+      };
+    } catch (error) {
+      return {
+        checked: true,
+        url,
+        reachable: false,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   server.registerResource("vibe_status", "vibe://status", {
     title: "Vibe Codex Status",
-    description: "Minimal JSON status resource for ChatGPT connector diagnostics.",
+    description: "JSON status resource for ChatGPT connector diagnostics.",
     mimeType: "application/json",
   }, async (uri) => ({
     contents: [{
@@ -227,15 +370,56 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       mimeType: "application/json",
       text: JSON.stringify({
         version: "0.2.1",
+        app: {
+          name: "Vibe Codex",
+          description: "Tell ChatGPT what to build. Watch Codex do it.",
+        },
+        authMode: connectorMode(),
         allowedRoots: config.allowedRoots,
         defaultParentDir: config.defaultParentDir,
+        connector: {
+          setupUrl: config.publicBaseUrl ? `${config.publicBaseUrl.replace(/\/+$/, "")}/mcp` : undefined,
+          oauthEnabled: config.enableExperimentalOAuth,
+          urlTokenAuthEnabled: config.allowUrlTokenAuth,
+          publicReachability: await checkPublicReachability(config.publicBaseUrl),
+        },
+        codexAppServer: await detectManagedCodexAppServer(config),
+        projects: runStore.listProjects().slice(0, 20),
         urlTokenAuthEnabled: config.allowUrlTokenAuth,
-        recentRuns: runStore.listRuns().slice(0, 5),
+        recentRuns: runStore.listRuns().slice(0, 5).map(summarizeRun),
         pendingApprovals: approvalStore.list("pending"),
-        authSessions: stores.authSessions.list(),
+        authSessions: stores.authSessions.list().slice(0, 10).map(summarizeAuthSession),
         warnings: authWarnings(config),
       }, null, 2),
     }],
+  }));
+
+  server.registerResource("vibe_operator_guide", "vibe://operator-guide", {
+    title: "Vibe Codex Operator Guide",
+    description: "Tool-selection and safety guidance for ChatGPT operating Vibe Codex.",
+    mimeType: "text/markdown",
+  }, async (uri) => ({
+    contents: [{ uri: uri.href, mimeType: "text/markdown", text: operatorGuideMarkdown() }],
+  }));
+
+  server.registerResource("vibe_feature_matrix", "vibe://feature-matrix", {
+    title: "Vibe Codex Feature Matrix",
+    description: "Feature coverage, auth, paste mode, test coverage, and known limits.",
+    mimeType: "text/markdown",
+  }, async (uri) => ({
+    contents: [{
+      uri: uri.href,
+      mimeType: "text/markdown",
+      text: await readDocResource("docs/FEATURE_MATRIX.md", "# Feature Matrix\n\nFeature matrix documentation is not available."),
+    }],
+  }));
+
+  server.registerResource("vibe_setup", "vibe://setup", {
+    title: "Vibe Codex Setup",
+    description: "Concise local setup and ChatGPT Developer Mode connector instructions.",
+    mimeType: "text/markdown",
+  }, async (uri) => ({
+    contents: [{ uri: uri.href, mimeType: "text/markdown", text: setupMarkdown() }],
   }));
 
   server.registerTool("relay_health", {
@@ -268,11 +452,11 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
   }));
 
   server.registerTool("connector_setup_status", {
-    description: "Show ChatGPT connector setup status, redacted connector URL template, recent runs, pending approvals, auth sessions, and safety warnings.",
-    inputSchema: z.object({ baseUrl: z.string().url().optional(), recentRunLimit: z.number().int().min(1).max(20).optional() }).optional(),
+    description: "Show ChatGPT connector setup status, redacted connector URL template, optional public tunnel reachability, recent runs, pending approvals, auth sessions, and safety warnings.",
+    inputSchema: z.object({ baseUrl: z.string().url().optional(), recentRunLimit: z.number().int().min(1).max(20).optional(), checkPublicReachability: z.boolean().optional() }).optional(),
   }, async (args) => safeTool(async () => {
     const baseUrl = args?.baseUrl ?? config.publicBaseUrl;
-    const recentRuns = runStore.listRuns().slice(0, args?.recentRunLimit ?? 5);
+    const recentRuns = runStore.listRuns().slice(0, args?.recentRunLimit ?? 5).map(summarizeRun);
     const pendingApprovals = approvalStore.list("pending");
     const connectorUsesOAuth = config.enableExperimentalOAuth;
     const mcpUrl = baseUrl
@@ -294,6 +478,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       tunnel: {
         configured: !!baseUrl,
         publicBaseUrl: baseUrl,
+        reachability: args?.checkPublicReachability === false ? { checked: false, reason: "disabled by request" } : await checkPublicReachability(baseUrl),
       },
       codex: {
         available: await checkCodexAvailable(config),
@@ -301,7 +486,7 @@ export function registerTools(server: McpServer, config: Config, runStore: RunSt
       },
       recentRuns,
       pendingApprovals,
-      authSessions: stores.authSessions.list(),
+      authSessions: stores.authSessions.list().slice(0, 10).map(summarizeAuthSession),
       allowedRoots: config.allowedRoots,
       defaultParentDir: config.defaultParentDir,
       warnings: authWarnings(config),

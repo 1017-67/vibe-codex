@@ -9,6 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "verify": "tsx scripts/verify.ts",
+    "verify:public": "tsx scripts/verifyPublicOAuth.ts",
     "pair": "tsx scripts/generatePairToken.ts"
   },
   "dependencies": {

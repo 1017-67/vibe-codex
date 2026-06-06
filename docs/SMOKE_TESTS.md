@@ -17,6 +17,13 @@ Security hardening checks:
 npm install
 npm run build
 npm test
+npm run verify
+```
+
+If `PUBLIC_BASE_URL` points at an active HTTPS tunnel and OAuth is enabled:
+
+```bash
+npm run verify:public
 ```
 
 ## Local MCP
@@ -55,7 +62,14 @@ Authentication: No auth
 MCP URL: https://<ngrok-url>/mcp/<URL_TOKEN>
 ```
 
-Call `relay_health`, then `connector_setup_status`.
+Call `relay_health`, then `connector_setup_status` with `checkPublicReachability: true`. If OAuth is enabled, the reachability probe checks `/.well-known/oauth-protected-resource` and should report tunnel failures such as an offline ngrok endpoint before ChatGPT attempts the full OAuth flow.
+
+Read ChatGPT App resources:
+
+- `vibe://status`
+- `vibe://operator-guide`
+- `vibe://feature-matrix`
+- `vibe://setup`
 
 ## Codex Desktop Visible Run
 
@@ -122,6 +136,14 @@ Call `relay_health`, then `connector_setup_status`.
 11. Confirm no new workspace was created during `start_project_task` or `continue_project_task`.
 12. Confirm the app-thread path used WebSocket JSON-RPC app-server calls such as `thread/start`, `thread/resume`, and `turn/start`, not HTTP `/threads`.
 13. Confirm the prompt tells Codex to use `rg --files` or `find .`, not `find ..`, so file discovery stays inside the workspace root.
+
+## Raw Existing-Thread Message
+
+1. Call `list_codex_threads` and identify the existing Codex app thread by title, preview, or ID.
+2. Call `send_codex_app_thread_message` with the exact plain message.
+3. Confirm the result returns `promptSubmittedAutomatically: true`, `requiresManualPaste: false`, `usesCodexExec: false`, and `usesShellScript: false`.
+4. Confirm the sent prompt is not wrapped in `Source: ChatGPT via Vibe Codex` or any implementation handoff envelope.
+5. Do not call `start_project_task` or `continue_project_task` for this raw-message workflow.
 
 ## Legacy Terminal Visible Run
 

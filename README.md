@@ -184,6 +184,15 @@ Dynamic client registration remains unauthenticated when experimental OAuth is e
 
 ## Tools
 
+MCP resources exposed for ChatGPT App context:
+
+- `vibe://status`: current relay status, auth mode, app-server status, recent projects/runs, approvals, setup hints, and warnings.
+- `vibe://operator-guide`: concise tool-selection and safety guidance.
+- `vibe://feature-matrix`: feature coverage, auth, paste mode, tests, and limits.
+- `vibe://setup`: concise local setup and ChatGPT Developer Mode instructions.
+
+Primary MCP tools:
+
 - `relay_health`
 - `connector_setup_status`
 - `get_connector_url`
@@ -224,6 +233,16 @@ Dynamic client registration remains unauthenticated when experimental OAuth is e
 - `approve_action`
 - `reject_action`
 - `list_pending_approvals`
+
+Tool-selection rules:
+
+- Use `start_project_task` / `continue_project_task` for implementation or inspection tasks in registered projects. These tools add a Vibe Codex handoff envelope.
+- Use `send_codex_app_thread_message` / `run_codex_app_thread_turn` for raw/plain messages to existing Codex app threads. These tools do not add the handoff envelope.
+- Use `codex-app-thread` for true no-paste Codex app/thread execution, `ghostty-visible` as the no-paste terminal fallback, and `codex-app-visible` / `app-supervised` only as manual-paste GUI fallbacks.
+- Do not use `write_file` as fallback after Codex failure unless the user explicitly authorizes direct writes.
+- Do not create a new workspace for a registered project task unless the user explicitly asks for new workspace creation.
+
+`connector_setup_status` can also check whether `PUBLIC_BASE_URL` is reachable. When OAuth is enabled it probes `/.well-known/oauth-protected-resource`, which catches common tunnel failures such as an offline ngrok endpoint before ChatGPT tries to connect.
 
 ## Registered Projects
 
@@ -370,6 +389,19 @@ ChatGPT calls:
 5. collect_project_result
 ```
 
+Raw existing-thread message workflow:
+
+```text
+User asks ChatGPT:
+"Send 'Hi from ChatGPT Web via Vibe Codex' to the Codex app chat named Implement Vibe Codex v0.1."
+
+ChatGPT calls:
+1. list_codex_threads
+2. send_codex_app_thread_message with the exact plain message
+
+Do not call start_project_task or continue_project_task for this workflow.
+```
+
 ## Autonomy Levels
 
 - `manual`: health, listing, safe reads, and prompt compilation only.
@@ -393,6 +425,24 @@ Blocked commands never run. Dangerous commands are not executed. Normal commands
 - Dangerous commands are rejected or approval-required instead of executed.
 - The Codex app is opened for supervision only.
 - Shell command strings are accepted after strict risk classification; stronger parsing is planned.
+
+## Verification
+
+Run the full local verification bundle:
+
+```bash
+npm run verify
+```
+
+This runs `npm run build`, `npm test`, then performs an in-process MCP smoke check for initialize, `tools/list`, the Vibe resources, `relay_health`, app-server status, and project registration reuse.
+
+With `PUBLIC_BASE_URL` and OAuth enabled, run a tunneled OAuth smoke that mimics ChatGPT's dynamic client registration and MCP session flow:
+
+```bash
+npm run verify:public
+```
+
+This checks OAuth metadata, `/register`, `/authorize`, `/token`, MCP initialize, `tools/list`, Vibe resources, `relay_health`, `connector_setup_status`, app-server status, and registration of the current repository without creating a new workspace. Set `VERIFY_PROJECT_PATH=/path/to/repo` to register a different allowed workspace.
 
 ## Roadmap
 

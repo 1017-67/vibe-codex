@@ -140,6 +140,60 @@ describe("MCP Streamable HTTP sessions", () => {
     expect(startProjectTool.description).toContain("Do not use it to send a plain message");
   });
 
+  it("resources/list and resources/read expose ChatGPT App guidance", async () => {
+    const init = await initialize();
+    await (await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId!)).text();
+
+    const listResponse = await postMcp({ jsonrpc: "2.0", id: 200, method: "resources/list", params: {} }, init.sessionId!);
+    const listPayload = parseMcpResponse(await listResponse.text());
+    expect(listResponse.status).toBe(200);
+    const uris = listPayload.result.resources.map((resource: any) => resource.uri);
+    expect(uris).toEqual(expect.arrayContaining(["vibe://status", "vibe://operator-guide", "vibe://feature-matrix", "vibe://setup"]));
+
+    const statusResponse = await postMcp({ jsonrpc: "2.0", id: 201, method: "resources/read", params: { uri: "vibe://status" } }, init.sessionId!);
+    const statusPayload = parseMcpResponse(await statusResponse.text());
+    const status = JSON.parse(statusPayload.result.contents[0].text);
+    expect(status.app.name).toBe("Vibe Codex");
+    expect(status.authMode).toBe("Bearer");
+    expect(status.codexAppServer).toBeTruthy();
+    expect(status.connector.publicReachability.checked).toBe(false);
+
+    const guideResponse = await postMcp({ jsonrpc: "2.0", id: 202, method: "resources/read", params: { uri: "vibe://operator-guide" } }, init.sessionId!);
+    const guidePayload = parseMcpResponse(await guideResponse.text());
+    expect(guidePayload.result.contents[0].text).toContain("send_codex_app_thread_message");
+    expect(guidePayload.result.contents[0].text).toContain("Do not create a new workspace");
+
+    const matrixResponse = await postMcp({ jsonrpc: "2.0", id: 203, method: "resources/read", params: { uri: "vibe://feature-matrix" } }, init.sessionId!);
+    const matrixPayload = parseMcpResponse(await matrixResponse.text());
+    expect(matrixPayload.result.contents[0].text).toContain("| Feature | MCP tools/resources | Status | Auth | Paste mode | Tests | Limits |");
+    expect(matrixPayload.result.contents[0].text).toContain("Raw thread messages");
+
+    const setupResponse = await postMcp({ jsonrpc: "2.0", id: 204, method: "resources/read", params: { uri: "vibe://setup" } }, init.sessionId!);
+    const setupPayload = parseMcpResponse(await setupResponse.text());
+    expect(setupPayload.result.contents[0].text).toContain("ChatGPT Developer Mode");
+  });
+
+  it("connector_setup_status can check OAuth public reachability", async () => {
+    ctx.config.enableExperimentalOAuth = true;
+    const init = await initialize();
+    await (await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, init.sessionId!)).text();
+
+    const response = await postMcp({
+      jsonrpc: "2.0",
+      id: 205,
+      method: "tools/call",
+      params: { name: "connector_setup_status", arguments: { baseUrl, checkPublicReachability: true } },
+    }, init.sessionId!);
+    const payload = parseMcpResponse(await response.text());
+    expect(response.status).toBe(200);
+    expect(payload.result.structuredContent.chatGptDeveloperMode.authentication).toBe("OAuth");
+    expect(payload.result.structuredContent.tunnel.reachability).toMatchObject({
+      checked: true,
+      reachable: true,
+      status: 200,
+    });
+  });
+
   it("tools/list without a valid session returns 400 instead of 500", async () => {
     const response = await postMcp({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, "missing-session");
     const payload = await response.json();
