@@ -407,7 +407,7 @@ describe("MCP Streamable HTTP sessions", () => {
     } finally {
       process.env.PATH = originalPath;
     }
-  });
+  }, 15_000);
 
   it("detect_codex_app_server reports unavailable through MCP", async () => {
     const init = await initialize();

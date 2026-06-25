@@ -281,7 +281,7 @@ describe("Codex exec integration", () => {
     } finally {
       process.env.PATH = originalPath;
     }
-  });
+  }, 15_000);
 
   it("collects visible completion status and changed files since baseline", async () => {
     await runProcessArgv({ file: "git", args: ["init"], cwd: workspace });

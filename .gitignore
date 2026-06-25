@@ -6,3 +6,4 @@ dist/
 *.sqlite-wal
 coverage/
 .DS_Store
+.vibe-codex/launchd/

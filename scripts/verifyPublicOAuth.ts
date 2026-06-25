@@ -23,7 +23,7 @@ type SimpleResponse = {
 function curlFetch(url: string, init?: RequestInit): Promise<SimpleResponse> {
   return new Promise((resolve, reject) => {
     const method = init?.method ?? "GET";
-    const args = ["--http1.1", "-sS", "-i", "-X", method];
+    const args = ["-sS", "-i", "-X", method];
     const headers = init?.headers as Record<string, string> | undefined;
     for (const [name, value] of Object.entries(headers ?? {})) args.push("-H", `${name}: ${value}`);
     let body = "";

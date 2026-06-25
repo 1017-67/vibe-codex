@@ -135,9 +135,36 @@ npm run build
 npm start
 ```
 
+## Start Automatically On macOS
+
+Install LaunchAgents to start Vibe Codex and its ngrok tunnel whenever you log in:
+
+```bash
+npm run launchd:install
+```
+
+This installs two user LaunchAgents:
+
+- `com.vibecodex.server`: builds and runs `npm start` in this repository.
+- `com.vibecodex.ngrok`: waits for `127.0.0.1:8787`, then runs ngrok for the `PUBLIC_BASE_URL` host from `.env`.
+
+Check status:
+
+```bash
+npm run launchd:status
+```
+
+Remove the background services:
+
+```bash
+npm run launchd:uninstall
+```
+
+Logs are written under `.vibe-codex/launchd/`.
+
 ## ChatGPT Connector
 
-For ChatGPT local connector use, expose the local MCP endpoint with a secure tunnel such as Cloudflare Tunnel or ngrok, then configure the connector URL to the tunneled `/mcp` endpoint. Vibe Codex does not hardcode or manage tunnel logic.
+For ChatGPT local connector use, expose the local MCP endpoint with a secure tunnel such as Cloudflare Tunnel or ngrok, then configure the connector URL to the tunneled `/mcp` endpoint. The macOS LaunchAgent setup above can keep your configured ngrok tunnel running in the background.
 
 For ChatGPT Developer Mode testing with URL token auth:
 
